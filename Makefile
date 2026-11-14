@@ -36,7 +36,8 @@ logs:
 # The tests submit the Flink job once their traffic is in Kafka.
 e2e-up:
 	docker compose down -v
-	docker compose up -d --build --wait kafka postgres flink-jobmanager flink-taskmanager grafana
+	docker compose up -d --build --wait kafka postgres flink-jobmanager flink-taskmanager \
+		kafka-exporter prometheus grafana
 	docker compose run --rm topics
 
 e2e:

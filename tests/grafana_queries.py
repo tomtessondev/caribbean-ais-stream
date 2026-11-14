@@ -26,6 +26,12 @@ def dashboard_queries() -> list[tuple[str, str]]:
     return _targets("rawSql")
 
 
+def prometheus_queries() -> list[tuple[str, str]]:
+    """(dashboard/panel, PromQL) of every Prometheus panel, with Grafana's rate interval
+    replaced by a fixed one."""
+    return [(name, expr.replace("$__rate_interval", "1m")) for name, expr in _targets("expr")]
+
+
 def render(sql: str) -> str:
     """Expand the Grafana macros the queries use, as Grafana would. The time range is the
     six hours before the latest data, so the tests do not depend on the wall clock."""

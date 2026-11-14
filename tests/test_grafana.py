@@ -12,7 +12,7 @@ DATASOURCES = {"postgres", "prometheus"}
 
 
 def test_dashboards_are_well_formed() -> None:
-    assert [p.stem for p in DASHBOARDS] == ["ais-traffic"]
+    assert [p.stem for p in DASHBOARDS] == ["ais-traffic", "stream-health"]
     for path in DASHBOARDS:
         board = json.loads(path.read_text(encoding="utf-8"))
         ids = [panel["id"] for panel in board["panels"]]

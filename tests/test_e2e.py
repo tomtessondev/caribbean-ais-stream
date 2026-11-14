@@ -11,6 +11,7 @@ import json
 import os
 import subprocess
 import time
+import urllib.parse
 import urllib.request
 from collections import defaultdict
 from collections.abc import Callable
@@ -20,7 +21,7 @@ from typing import Any
 
 import psycopg
 import pytest
-from grafana_queries import dashboard_queries, render
+from grafana_queries import dashboard_queries, prometheus_queries, render
 from psycopg.rows import dict_row
 
 from ais_stream.kafka import AisProducer
@@ -33,6 +34,7 @@ pytestmark = pytest.mark.e2e
 KAFKA = os.getenv("E2E_KAFKA", "localhost:9094")
 FLINK = os.getenv("E2E_FLINK", "http://localhost:8082")
 POSTGRES = os.getenv("E2E_POSTGRES", "postgresql://ais:ais@localhost:5434/ais")
+PROMETHEUS = os.getenv("E2E_PROMETHEUS", "http://localhost:9090")
 # Grafana's read-only role (postgres/init.sql), with the local default password.
 READER = POSTGRES.replace("ais:ais@", "grafana_reader:grafana-local@")
 REPOSITORY = Path(__file__).resolve().parents[1]
@@ -255,6 +257,26 @@ def test_a_dark_ship_stays_on_the_map(played: datetime) -> None:
         with psycopg.connect(POSTGRES) as conn:
             conn.execute("delete from ship_positions where mmsi = 999000001")
             conn.execute("delete from ship_sessions where mmsi = 999000001")
+
+
+def prom(expr: str) -> list[dict[str, Any]]:
+    """Result of an instant PromQL query; an invalid query raises (HTTP 400)."""
+    url = f"{PROMETHEUS}/api/v1/query?" + urllib.parse.urlencode({"query": expr})
+    with urllib.request.urlopen(url, timeout=5) as response:
+        result: list[dict[str, Any]] = json.load(response)["data"]["result"]
+    return result
+
+
+def test_prometheus_sees_lag_and_flink(played: datetime) -> None:
+    """The lag comes from the broker (Kafka exporter), so it stays visible when the job is
+    down; Flink's own metrics come from its Prometheus reporter."""
+    wait_until(lambda: bool(prom('kafka_consumergroup_lag{consumergroup="flink-ais"}')), 120, "lag")
+    wait_until(lambda: bool(prom('{__name__=~"flink_.+"}')), 120, "Flink metrics")
+
+
+@pytest.mark.parametrize(("name", "expr"), prometheus_queries())
+def test_every_promql_query_is_valid(played: datetime, name: str, expr: str) -> None:
+    prom(expr)
 
 
 def test_grafana_role_cannot_write(played: datetime) -> None:
