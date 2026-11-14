@@ -17,7 +17,7 @@ from ais_stream.messages import parse_aisstream_time
 from ais_stream.pipeline import handle
 from ais_stream.sources import live as live_source
 from ais_stream.sources import replay as replay_source
-from ais_stream.synthetic import traffic
+from ais_stream.synthetic import stream, traffic
 
 app = typer.Typer(help="Lesser Antilles ship traffic, from AIS to Kafka", no_args_is_help=True)
 
@@ -103,7 +103,9 @@ def synthesize(
 @app.command()
 def demo(
     bootstrap: str = Bootstrap,
-    hours: float = typer.Option(24, min=0.1, help="Hours of traffic to play"),
+    hours: float = typer.Option(
+        24 * 365, min=0.1, help="Hours of traffic to play (a restart sends every ship back to port)"
+    ),
     seed: int = typer.Option(7, help="Same seed, same traffic"),
 ) -> None:
     """Play synthetic traffic into Kafka at the real pace, timestamped from now on, as if
@@ -112,7 +114,7 @@ def demo(
     start = datetime.now(UTC).replace(microsecond=0)
     sent = 0
     try:
-        for message in traffic(start, hours, seed):
+        for message in stream(start, hours, seed):
             due = parse_aisstream_time(message["MetaData"]["time_utc"])
             wait = (due - datetime.now(UTC)).total_seconds()
             if wait > 0:

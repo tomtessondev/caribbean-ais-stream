@@ -1,5 +1,5 @@
 -- Flink SQL jobs on the AIS position stream, submitted by the `flink-jobs` Compose service.
--- Both run in one streaming job (statement set) reading ais.positions once.
+-- All run in one streaming job (statement set) reading ais.positions once.
 
 -- Window boundaries are written as UTC wall-clock times.
 SET 'table.local-time-zone' = 'UTC';
@@ -84,6 +84,77 @@ CREATE TABLE ship_hourly (
     'password' = 'ais'
 );
 
+CREATE TABLE ship_sessions (
+    mmsi          BIGINT,
+    session_start TIMESTAMP(3),
+    last_seen     TIMESTAMP(3),
+    ship_name     STRING,
+    last_lat      DOUBLE,
+    last_lon      DOUBLE,
+    PRIMARY KEY (mmsi, session_start) NOT ENFORCED
+) WITH (
+    'connector' = 'jdbc',
+    'url' = 'jdbc:postgresql://postgres:5432/ais',
+    'table-name' = 'ship_sessions',
+    'username' = 'ais',
+    'password' = 'ais'
+);
+
+CREATE TABLE ais_gaps (
+    mmsi           BIGINT,
+    silent_from    TIMESTAMP(3),
+    silent_until   TIMESTAMP(3),
+    silent_minutes DOUBLE,
+    from_lat       DOUBLE,
+    from_lon       DOUBLE,
+    to_lat         DOUBLE,
+    to_lon         DOUBLE,
+    ship_name      STRING,
+    PRIMARY KEY (mmsi, silent_from) NOT ENFORCED
+) WITH (
+    'connector' = 'jdbc',
+    'url' = 'jdbc:postgresql://postgres:5432/ais',
+    'table-name' = 'ais_gaps',
+    'username' = 'ais',
+    'password' = 'ais'
+);
+
+CREATE TABLE position_jumps (
+    mmsi             BIGINT,
+    from_time        TIMESTAMP(3),
+    to_time          TIMESTAMP(3),
+    from_lat         DOUBLE,
+    from_lon         DOUBLE,
+    to_lat           DOUBLE,
+    to_lon           DOUBLE,
+    distance_nm      DOUBLE,
+    implied_speed_kn DOUBLE,
+    ship_name        STRING,
+    PRIMARY KEY (mmsi, to_time) NOT ENFORCED
+) WITH (
+    'connector' = 'jdbc',
+    'url' = 'jdbc:postgresql://postgres:5432/ais',
+    'table-name' = 'position_jumps',
+    'username' = 'ais',
+    'password' = 'ais'
+);
+
+CREATE TABLE port_events (
+    mmsi       BIGINT,
+    event_time TIMESTAMP(3),
+    port       STRING,
+    event      STRING,
+    ship_name  STRING,
+    sog_kn     DOUBLE,
+    PRIMARY KEY (mmsi, event_time) NOT ENFORCED
+) WITH (
+    'connector' = 'jdbc',
+    'url' = 'jdbc:postgresql://postgres:5432/ais',
+    'table-name' = 'port_events',
+    'username' = 'ais',
+    'password' = 'ais'
+);
+
 EXECUTE STATEMENT SET
 BEGIN
 
@@ -115,5 +186,130 @@ SELECT
     LAST_VALUE(lon)
 FROM TABLE(TUMBLE(TABLE positions, DESCRIPTOR(event_time), INTERVAL '1' HOUR))
 GROUP BY mmsi, window_start, window_end;
+
+-- Ships going dark: a session window per ship closes after 15 minutes without a position,
+-- so its row is the alert, written 15 minutes after the last report. Ships under way report
+-- every few seconds and moored ones every 3 minutes: 15 minutes is at least five missed
+-- reports. Window deduplication keeps the session's last position (an aggregation could
+-- not: session windows merge, and LAST_VALUE cannot be merged).
+INSERT INTO ship_sessions
+SELECT mmsi, window_start, CAST(event_time AS TIMESTAMP(3)), ship_name, lat, lon
+FROM (
+    SELECT
+        *,
+        ROW_NUMBER() OVER (
+            PARTITION BY mmsi, window_start, window_end ORDER BY event_time DESC
+        ) AS rn
+    FROM TABLE(SESSION(TABLE positions PARTITION BY mmsi, DESCRIPTOR(event_time), INTERVAL '15' MINUTES))
+)
+WHERE rn = 1;
+
+-- The end of a silence: two consecutive positions of a ship more than 15 minutes apart,
+-- written as soon as the ship reports again. (The session it starts is only written when
+-- it ends, possibly days later.)
+INSERT INTO ais_gaps
+SELECT mmsi, silent_from, silent_until, silent_minutes, from_lat, from_lon, to_lat, to_lon, ship_name
+FROM positions
+MATCH_RECOGNIZE (
+    PARTITION BY mmsi
+    ORDER BY event_time
+    MEASURES
+        CAST(A.event_time AS TIMESTAMP(3)) AS silent_from,
+        CAST(B.event_time AS TIMESTAMP(3)) AS silent_until,
+        CAST(TIMESTAMPDIFF(SECOND, A.event_time, B.event_time) AS DOUBLE) / 60 AS silent_minutes,
+        A.lat AS from_lat,
+        A.lon AS from_lon,
+        B.lat AS to_lat,
+        B.lon AS to_lon,
+        B.ship_name AS ship_name
+    ONE ROW PER MATCH
+    AFTER MATCH SKIP TO LAST B
+    PATTERN (A B)
+    -- Same rule as the session window, to the millisecond: every closed session gets its gap.
+    DEFINE B AS B.event_time > A.event_time + INTERVAL '15' MINUTE
+);
+
+-- Physically impossible jumps (spoofed or corrupted positions): two consecutive positions
+-- more than 1 nm apart at an implied speed above 60 knots, faster than any ship in the area
+-- (fast ferries do about 40). The 1 nm floor keeps GPS noise over short intervals out.
+-- Distance in nautical miles, flat-earth approximation (exact enough over these distances):
+-- 1 degree of latitude = 60 nm, a degree of longitude shrinks with cos(latitude). DEFINE
+-- cannot refer to MEASURES, so the formula is written twice. The elapsed time is at least
+-- 1 s, for two positions with the same timestamp. SKIP TO LAST B lets a spoofed position
+-- be the end of one jump and the start of the next (out, then back).
+INSERT INTO position_jumps
+SELECT
+    mmsi, from_time, to_time, from_lat, from_lon, to_lat, to_lon,
+    distance_nm, distance_nm * 3600 / elapsed_s, ship_name
+FROM positions
+MATCH_RECOGNIZE (
+    PARTITION BY mmsi
+    ORDER BY event_time
+    MEASURES
+        CAST(A.event_time AS TIMESTAMP(3)) AS from_time,
+        CAST(B.event_time AS TIMESTAMP(3)) AS to_time,
+        A.lat AS from_lat,
+        A.lon AS from_lon,
+        B.lat AS to_lat,
+        B.lon AS to_lon,
+        SQRT(
+            POWER((B.lat - A.lat) * 60, 2)
+            + POWER((B.lon - A.lon) * 60 * COS(RADIANS((A.lat + B.lat) / 2)), 2)
+        ) AS distance_nm,
+        CAST(GREATEST(TIMESTAMPDIFF(SECOND, A.event_time, B.event_time), 1) AS DOUBLE) AS elapsed_s,
+        B.ship_name AS ship_name
+    ONE ROW PER MATCH
+    AFTER MATCH SKIP TO LAST B
+    PATTERN (A B)
+    DEFINE B AS
+        SQRT(
+            POWER((B.lat - A.lat) * 60, 2)
+            + POWER((B.lon - A.lon) * 60 * COS(RADIANS((A.lat + B.lat) / 2)), 2)
+        ) > 1
+        AND SQRT(
+            POWER((B.lat - A.lat) * 60, 2)
+            + POWER((B.lon - A.lon) * 60 * COS(RADIANS((A.lat + B.lat) / 2)), 2)
+        ) * 3600 / GREATEST(TIMESTAMPDIFF(SECOND, A.event_time, B.event_time), 1) > 60
+);
+
+-- Port arrivals and departures: a ship's position moving from outside every port area into
+-- one (arrival, at the first position inside) or out of one (departure, at the first
+-- position outside). A ship first seen inside a port gets no arrival.
+INSERT INTO port_events
+SELECT mmsi, event_time, port, 'arrival', ship_name, sog_kn
+FROM positions_in_port
+MATCH_RECOGNIZE (
+    PARTITION BY mmsi
+    ORDER BY event_time
+    MEASURES
+        CAST(INSIDE.event_time AS TIMESTAMP(3)) AS event_time,
+        INSIDE.port AS port,
+        INSIDE.ship_name AS ship_name,
+        INSIDE.sog_kn AS sog_kn
+    ONE ROW PER MATCH
+    AFTER MATCH SKIP TO LAST INSIDE
+    PATTERN (OUTSIDE INSIDE)
+    DEFINE
+        OUTSIDE AS OUTSIDE.port IS NULL,
+        INSIDE AS INSIDE.port IS NOT NULL
+)
+UNION ALL
+SELECT mmsi, event_time, port, 'departure', ship_name, sog_kn
+FROM positions_in_port
+MATCH_RECOGNIZE (
+    PARTITION BY mmsi
+    ORDER BY event_time
+    MEASURES
+        CAST(OUTSIDE.event_time AS TIMESTAMP(3)) AS event_time,
+        INSIDE.port AS port,
+        OUTSIDE.ship_name AS ship_name,
+        OUTSIDE.sog_kn AS sog_kn
+    ONE ROW PER MATCH
+    AFTER MATCH SKIP TO LAST OUTSIDE
+    PATTERN (INSIDE OUTSIDE)
+    DEFINE
+        INSIDE AS INSIDE.port IS NOT NULL,
+        OUTSIDE AS OUTSIDE.port IS NULL
+);
 
 END;

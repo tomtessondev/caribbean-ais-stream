@@ -4,12 +4,14 @@ A handful of ships with the habits of the real ones around Guadeloupe and Martin
 inter-island ferry shuttling Pointe-à-Pitre - Roseau - Fort-de-France, a cargo ship calling
 at Pointe-à-Pitre, a cruise ship between Fort-de-France and Castries, a tanker at anchor
 off Fort-de-France, fishing boats working off Le Moule, and one cargo ship whose AIS goes
-silent for 45 minutes mid-passage (the "dark vessel" a later stage should detect).
-Same seed, same traffic.
+silent for 45 minutes mid-passage (the "dark vessel" the anomaly detection must catch), and
+one whose AIS reports a single spoofed position 30 nautical miles off its track (an
+impossible jump, out and back). Same seed, same traffic.
 """
 
 from __future__ import annotations
 
+import heapq
 import math
 import random
 from collections.abc import Iterator
@@ -131,9 +133,16 @@ def _shuttle(
     end: datetime,
     rng: random.Random,
     silent: tuple[timedelta, timedelta] | None = None,
+    spoofed: timedelta | None = None,
 ) -> Iterator[dict[str, Any]]:
-    """Sails the route, dwells moored at its end, sails it back, and so on."""
+    """Sails the route, dwells moored at its end, sails it back, and so on.
+
+    `silent`: (offset from start, duration) without any position report.
+    `spoofed`: offset from start of the one position reported 0.5° of latitude south of
+    the true track.
+    """
     ts = start
+    spoof_pending = spoofed is not None
     leg_ports = route
     last_static = start - STATIC_EVERY
     while ts < end:
@@ -149,6 +158,9 @@ def _shuttle(
                 f = (ts - leg_start).total_seconds() / 3600 / leg_hours
                 at = (a[0] + (b[0] - a[0]) * f, a[1] + (b[1] - a[1]) * f)
                 dark = silent is not None and silent[0] <= ts - start < silent[0] + silent[1]
+                if spoofed is not None and spoof_pending and ts - start >= spoofed:
+                    at = (at[0] - 0.5, at[1])
+                    spoof_pending = False
                 if not dark:
                     sog = speed_kn + rng.gauss(0, 0.3)
                     cog = (course + rng.gauss(0, 1.5)) % 360
@@ -195,8 +207,9 @@ def _fishing(
         ts += UNDER_WAY_STEP
 
 
-def traffic(start: datetime, hours: float, seed: int = 7) -> list[dict[str, Any]]:
-    """All messages of all ships over `hours`, in time order."""
+def stream(start: datetime, hours: float, seed: int = 7) -> Iterator[dict[str, Any]]:
+    """All messages of all ships over `hours`, in time order, generated as they are read:
+    each ship's messages are already in time order, so merging them needs no full list."""
     rng = random.Random(seed)
     end = start + timedelta(hours=hours)
     ferry = Ship(227000101, "ANTILLES EXPRESS", 60, "FAX101", 45, 12, 2.1)
@@ -204,6 +217,7 @@ def traffic(start: datetime, hours: float, seed: int = 7) -> list[dict[str, Any]
     cruise = Ship(636000303, "EMERALD PRINCESS", 60, "D5ER3", 290, 36, 8.5)
     tanker = Ship(538000404, "SEA HAWK", 80, "V7SH4", 183, 32, 11.2)
     dark = Ship(341000505, "BLUE MERIDIAN", 70, "V4BM5", 120, 20, 7.4)
+    spoofer = Ship(255000707, "OCEAN PEARL", 70, "CQOP7", 140, 22, 8.1)
     fishers = [
         Ship(227000601 + i, f"KANOT {i + 1}", 30, f"FPM60{i + 1}", 9, 3, 0.8) for i in range(3)
     ]
@@ -252,7 +266,21 @@ def traffic(start: datetime, hours: float, seed: int = 7) -> list[dict[str, Any]
             )
             for i, f in enumerate(fishers)
         ],
+        # Last, so its random stream is drawn after the others' and leaves them unchanged.
+        _shuttle(
+            spoofer,
+            ["Basse-Terre", "Roseau"],
+            14,
+            timedelta(hours=3),
+            start,
+            end,
+            random.Random(rng.random()),
+            spoofed=timedelta(hours=1, minutes=30),
+        ),
     ]
-    messages = [m for stream in streams for m in stream]
-    messages.sort(key=lambda m: m["MetaData"]["time_utc"])
-    return messages
+    return heapq.merge(*streams, key=lambda m: m["MetaData"]["time_utc"])
+
+
+def traffic(start: datetime, hours: float, seed: int = 7) -> list[dict[str, Any]]:
+    """All messages of all ships over `hours`, in time order."""
+    return list(stream(start, hours, seed))

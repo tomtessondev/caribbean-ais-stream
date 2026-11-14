@@ -33,10 +33,11 @@ logs:
 
 # A fresh stack without the demo producer: the e2e tests own the traffic and its event
 # times (old events would be late for a watermark that live traffic already pushed on).
+# The tests submit the Flink job once their traffic is in Kafka.
 e2e-up:
 	docker compose down -v
 	docker compose up -d --build --wait kafka postgres flink-jobmanager flink-taskmanager
-	docker compose up -d flink-jobs
+	docker compose run --rm topics
 
 e2e:
 	pytest -m e2e --no-cov

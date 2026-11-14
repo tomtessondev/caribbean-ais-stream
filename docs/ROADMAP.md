@@ -7,9 +7,11 @@
 2. **Flink SQL** (done). Flink 1.20 with the Kafka and JDBC connectors: event-time windows
    with watermarks and idle-partition handling, ships per port area every 5 minutes, one
    row per ship and hour, upserted into PostgreSQL; end-to-end test in CI.
-3. **Anomalies.** Ships going dark (AIS silence longer than their usual rate, session
-   windows), speed or position jumps that are physically impossible, loitering, port
-   arrivals and departures (pattern matching on the port areas).
+3. **Anomalies** (done). Ships going dark (15-minute session windows, and the end of the
+   silence by pattern matching), physically impossible position jumps (`MATCH_RECOGNIZE`,
+   over 1 nm at over 60 knots), port arrivals and departures (pattern matching on the port
+   areas); a spoofed position in the synthetic traffic. Left for later: loitering, and a
+   silence threshold adapted to each ship's own reporting rate.
 4. **Map and metrics.** A live map of the ships and port activity (Grafana geomap on the
    Flink outputs), consumer lag and throughput.
 5. **Schemas.** Avro with a schema registry, so producers and Flink agree on the records
