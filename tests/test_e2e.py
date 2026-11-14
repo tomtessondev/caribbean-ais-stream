@@ -12,6 +12,7 @@ import os
 import subprocess
 import time
 import urllib.request
+from collections import defaultdict
 from collections.abc import Callable
 from datetime import UTC, datetime, timedelta
 from pathlib import Path
@@ -171,6 +172,23 @@ def test_only_the_spoofed_position_jumps(played: datetime) -> None:
     assert all(25 < distance < 35 and speed > 60 for _, _, distance, speed in rows)
 
 
+def test_port_arrivals_and_departures(played: datetime) -> None:
+    rows = query(
+        "select mmsi, event, port from port_events"
+        f" where event_time >= '{played}' order by mmsi, event_time"
+    )
+    assert len(rows) == 12  # replayed from the generator through the same port boxes
+    by_ship: dict[int, list[tuple[str, str]]] = defaultdict(list)
+    for mmsi, event, port in rows:
+        by_ship[mmsi].append((event, port))
+    assert 538000404 not in by_ship  # the tanker never leaves the Fort-de-France box
+    assert by_ship[227000101][:2] == [("departure", "Pointe-a-Pitre"), ("arrival", "Roseau")]
+    for events in by_ship.values():  # departures and arrivals alternate, same port in/out
+        for (e1, p1), (e2, p2) in zip(events, events[1:], strict=False):
+            assert e1 != e2
+            assert e1 == "departure" or p1 == p2
+
+
 def test_reprocessing_from_scratch_gives_the_same_results(played: datetime) -> None:
     """Cancel the job and submit it again: it re-reads Kafka from the earliest offset and
     recomputes every window. The sinks upsert on their primary key, so the tables come out
@@ -182,6 +200,7 @@ def test_reprocessing_from_scratch_gives_the_same_results(played: datetime) -> N
         f"select * from ship_sessions where session_start >= '{played}' order by 1, 2",
         f"select * from ais_gaps where silent_from >= '{played}' order by 1, 2",
         f"select * from position_jumps where to_time >= '{played}' order by 1, 3",
+        f"select * from port_events where event_time >= '{played}' order by 1, 2",
     ]
     before = [query(snapshot) for snapshot in snapshots]
 

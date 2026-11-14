@@ -79,3 +79,14 @@ create table position_jumps (
     ship_name        text,
     primary key (mmsi, to_time)
 );
+
+-- A ship entering a port area (arrival) or leaving it (departure).
+create table port_events (
+    mmsi       bigint      not null,
+    event_time timestamptz not null,
+    port       text        not null,
+    event      text        not null check (event in ('arrival', 'departure')),
+    ship_name  text,
+    sog_kn     double precision,
+    primary key (mmsi, event_time)
+);

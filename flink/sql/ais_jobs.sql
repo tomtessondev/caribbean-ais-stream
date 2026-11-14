@@ -139,6 +139,22 @@ CREATE TABLE position_jumps (
     'password' = 'ais'
 );
 
+CREATE TABLE port_events (
+    mmsi       BIGINT,
+    event_time TIMESTAMP(3),
+    port       STRING,
+    event      STRING,
+    ship_name  STRING,
+    sog_kn     DOUBLE,
+    PRIMARY KEY (mmsi, event_time) NOT ENFORCED
+) WITH (
+    'connector' = 'jdbc',
+    'url' = 'jdbc:postgresql://postgres:5432/ais',
+    'table-name' = 'port_events',
+    'username' = 'ais',
+    'password' = 'ais'
+);
+
 EXECUTE STATEMENT SET
 BEGIN
 
@@ -253,6 +269,46 @@ MATCH_RECOGNIZE (
             POWER((B.lat - A.lat) * 60, 2)
             + POWER((B.lon - A.lon) * 60 * COS(RADIANS((A.lat + B.lat) / 2)), 2)
         ) * 3600 / GREATEST(TIMESTAMPDIFF(SECOND, A.event_time, B.event_time), 1) > 60
+);
+
+-- Port arrivals and departures: a ship's position moving from outside every port area into
+-- one (arrival, at the first position inside) or out of one (departure, at the first
+-- position outside). A ship first seen inside a port gets no arrival.
+INSERT INTO port_events
+SELECT mmsi, event_time, port, 'arrival', ship_name, sog_kn
+FROM positions_in_port
+MATCH_RECOGNIZE (
+    PARTITION BY mmsi
+    ORDER BY event_time
+    MEASURES
+        CAST(INSIDE.event_time AS TIMESTAMP(3)) AS event_time,
+        INSIDE.port AS port,
+        INSIDE.ship_name AS ship_name,
+        INSIDE.sog_kn AS sog_kn
+    ONE ROW PER MATCH
+    AFTER MATCH SKIP TO LAST INSIDE
+    PATTERN (OUTSIDE INSIDE)
+    DEFINE
+        OUTSIDE AS OUTSIDE.port IS NULL,
+        INSIDE AS INSIDE.port IS NOT NULL
+)
+UNION ALL
+SELECT mmsi, event_time, port, 'departure', ship_name, sog_kn
+FROM positions_in_port
+MATCH_RECOGNIZE (
+    PARTITION BY mmsi
+    ORDER BY event_time
+    MEASURES
+        CAST(OUTSIDE.event_time AS TIMESTAMP(3)) AS event_time,
+        INSIDE.port AS port,
+        OUTSIDE.ship_name AS ship_name,
+        OUTSIDE.sog_kn AS sog_kn
+    ONE ROW PER MATCH
+    AFTER MATCH SKIP TO LAST OUTSIDE
+    PATTERN (INSIDE OUTSIDE)
+    DEFINE
+        INSIDE AS INSIDE.port IS NOT NULL,
+        OUTSIDE AS OUTSIDE.port IS NULL
 );
 
 END;
