@@ -23,6 +23,8 @@ dev = [
     # the Flink results in PostgreSQL.
     "psycopg[binary]>=3.2",
     "testcontainers>=4.8",
+    # Grafana provisioning files are YAML (tests/test_grafana.py).
+    "pyyaml>=6",
 ]
 
 [project.scripts]

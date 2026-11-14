@@ -86,6 +86,8 @@ services:
       POSTGRES_USER: ais
       POSTGRES_PASSWORD: ais
       POSTGRES_DB: ais
+      # Password of the read-only role Grafana uses (postgres/init.sql).
+      GRAFANA_DB_PASSWORD: ${GRAFANA_DB_PASSWORD:-grafana-local}
     ports:
       - "5434:5432"
     volumes:
@@ -95,6 +97,28 @@ services:
       test: ["CMD-SHELL", "pg_isready -U ais -d ais"]
       interval: 2s
       retries: 30
+    restart: unless-stopped
+
+  # Map of the ships and stream health on http://localhost:3002 (3001 is taken by the
+  # sensor project's Grafana).
+  grafana:
+    image: grafana/grafana:12.3.0
+    environment:
+      GRAFANA_DB_PASSWORD: ${GRAFANA_DB_PASSWORD:-grafana-local}
+      GF_SECURITY_ADMIN_PASSWORD: ${GRAFANA_ADMIN_PASSWORD:-admin}
+      GF_ANALYTICS_REPORTING_ENABLED: "false"
+      # Local demo: dashboards readable without logging in; editing still needs admin.
+      GF_AUTH_ANONYMOUS_ENABLED: "true"
+      GF_AUTH_ANONYMOUS_ORG_ROLE: Viewer
+      GF_DASHBOARDS_DEFAULT_HOME_DASHBOARD_PATH: /var/lib/grafana/dashboards/ais-traffic.json
+    ports:
+      - "3002:3000"
+    volumes:
+      - ./grafana/provisioning:/etc/grafana/provisioning:ro
+      - ./grafana/dashboards:/var/lib/grafana/dashboards:ro
+    depends_on:
+      postgres:
+        condition: service_healthy
     restart: unless-stopped
 
   flink-jobmanager:

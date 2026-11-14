@@ -104,3 +104,9 @@ create table ship_positions (
     ship_name   text,
     port        text  -- port area the ship is in, if any
 );
+
+-- Grafana reads the results with its own role, which can only select. Its password comes
+-- from the environment of the postgres container (GRAFANA_DB_PASSWORD).
+\getenv grafana_password GRAFANA_DB_PASSWORD
+create role grafana_reader login password :'grafana_password';
+grant select on all tables in schema public to grafana_reader;

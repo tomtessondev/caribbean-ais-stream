@@ -20,6 +20,8 @@ from typing import Any
 
 import psycopg
 import pytest
+from grafana_queries import dashboard_queries, render
+from psycopg.rows import dict_row
 
 from ais_stream.kafka import AisProducer
 from ais_stream.messages import parse_aisstream_time
@@ -31,6 +33,8 @@ pytestmark = pytest.mark.e2e
 KAFKA = os.getenv("E2E_KAFKA", "localhost:9094")
 FLINK = os.getenv("E2E_FLINK", "http://localhost:8082")
 POSTGRES = os.getenv("E2E_POSTGRES", "postgresql://ais:ais@localhost:5434/ais")
+# Grafana's read-only role (postgres/init.sql), with the local default password.
+READER = POSTGRES.replace("ais:ais@", "grafana_reader:grafana-local@")
 REPOSITORY = Path(__file__).resolve().parents[1]
 PORTS = {"Basse-Terre", "Castries", "Fort-de-France", "Pointe-a-Pitre", "Roseau"}
 
@@ -206,6 +210,56 @@ def test_ship_positions_hold_each_ships_last_report(played: datetime) -> None:
                 message["MetaData"]["time_utc"]
             )
     assert dict(rows) == last
+
+
+@pytest.mark.parametrize(("name", "sql"), dashboard_queries())
+def test_every_dashboard_query_runs_as_grafana(played: datetime, name: str, sql: str) -> None:
+    with psycopg.connect(READER) as conn:
+        conn.execute(render(sql).encode()).fetchall()
+
+
+def map_rows() -> list[dict[str, Any]]:
+    (sql,) = [sql for name, sql in dashboard_queries() if name == "ais-traffic/Ships (latest)"]
+    with psycopg.connect(READER, row_factory=dict_row) as conn:
+        return conn.execute(render(sql).encode()).fetchall()
+
+
+def test_map_shows_every_ship(played: datetime) -> None:
+    """The traffic is two days old: the map is anchored on the data, not on the clock."""
+    rows = map_rows()
+    assert len(rows) == 9
+    assert {row["state"] for row in rows} <= {"moored", "under way", "jump"}
+
+
+def test_a_dark_ship_stays_on_the_map(played: datetime) -> None:
+    """A ship silent for an hour is past the map's 30-minute window, but an open dark
+    period keeps it there, in red. Its rows are removed afterwards; MMSI 999000001 is
+    never in Kafka, so Flink never touches them."""
+    ((anchor,),) = query("select max(ts) from ship_positions")
+    last_seen = anchor - timedelta(hours=1)
+    with psycopg.connect(POSTGRES) as conn:
+        conn.execute(
+            "insert into ship_positions (mmsi, ts, lat, lon, ship_name)"
+            " values (%s, %s, %s, %s, %s)",
+            (999000001, last_seen, 15.6, -61.5, "TEST DARK"),
+        )
+        conn.execute(
+            "insert into ship_sessions (mmsi, session_start, last_seen, ship_name, last_lat,"
+            " last_lon) values (%s, %s, %s, %s, %s, %s)",
+            (999000001, last_seen - timedelta(hours=1), last_seen, "TEST DARK", 15.6, -61.5),
+        )
+    try:
+        states = {row["mmsi"]: row["state"] for row in map_rows()}
+        assert states[999000001] == "dark"
+    finally:
+        with psycopg.connect(POSTGRES) as conn:
+            conn.execute("delete from ship_positions where mmsi = 999000001")
+            conn.execute("delete from ship_sessions where mmsi = 999000001")
+
+
+def test_grafana_role_cannot_write(played: datetime) -> None:
+    with pytest.raises(psycopg.errors.InsufficientPrivilege), psycopg.connect(READER) as conn:
+        conn.execute("delete from port_events")
 
 
 def test_reprocessing_from_scratch_gives_the_same_results(played: datetime) -> None:
