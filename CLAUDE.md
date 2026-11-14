@@ -18,8 +18,12 @@ count. Every change should be something a recruiter can read.
   - `kafka.py`: topics (`ais.positions`, compacted `ais.ships`, `ais.dlq`), keyed
     idempotent producer; `pipeline.py`: one raw message → record or reject
   - `synthetic.py`: deterministic traffic in aisstream's exact format
-- Kafka 3.9 KRaft (`apache/kafka`), Kafka UI, Docker Compose; Flink 1.20 next
-- pytest (unit; integration marked `integration` with a real `apache/kafka` broker started
+- Kafka 3.9 KRaft (`apache/kafka`), Kafka UI, Docker Compose
+- Flink 1.20 SQL (`flink/sql/ais_jobs.sql`, image `flink/Dockerfile` with Kafka, JDBC,
+  PostgreSQL and zstd jars) → PostgreSQL tables in `postgres/init.sql` (primary keys =
+  upsert keys). Event time + watermarks: old events are late and dropped, so e2e tests
+  need a fresh stack (`make e2e-up`).
+- pytest (unit; `e2e` marked tests on the Compose stack; integration marked `integration` with a real `apache/kafka` broker started
   by the `kafka` fixture), ruff, mypy --strict
 
 ## Commands
