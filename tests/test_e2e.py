@@ -11,6 +11,7 @@ import json
 import os
 import subprocess
 import time
+import urllib.parse
 import urllib.request
 from collections import defaultdict
 from collections.abc import Callable
@@ -20,8 +21,11 @@ from typing import Any
 
 import psycopg
 import pytest
+from grafana_queries import dashboard_queries, prometheus_queries, render
+from psycopg.rows import dict_row
 
 from ais_stream.kafka import AisProducer
+from ais_stream.messages import parse_aisstream_time
 from ais_stream.pipeline import handle
 from ais_stream.synthetic import traffic
 
@@ -30,6 +34,9 @@ pytestmark = pytest.mark.e2e
 KAFKA = os.getenv("E2E_KAFKA", "localhost:9094")
 FLINK = os.getenv("E2E_FLINK", "http://localhost:8082")
 POSTGRES = os.getenv("E2E_POSTGRES", "postgresql://ais:ais@localhost:5434/ais")
+PROMETHEUS = os.getenv("E2E_PROMETHEUS", "http://localhost:9090")
+# Grafana's read-only role (postgres/init.sql), with the local default password.
+READER = POSTGRES.replace("ais:ais@", "grafana_reader:grafana-local@")
 REPOSITORY = Path(__file__).resolve().parents[1]
 PORTS = {"Basse-Terre", "Castries", "Fort-de-France", "Pointe-a-Pitre", "Roseau"}
 
@@ -106,6 +113,8 @@ def played() -> datetime:
         f"select count(*) from port_events where event_time >= '{start}'": 12,
         f"select count(*) from position_jumps where to_time >= '{start}'": 2,
         f"select count(*) from ais_gaps where silent_from >= '{start}'": 1,
+        # Every ship reports until the end of the play: its row holds one of the last minutes.
+        f"select count(*) from ship_positions where ts > '{start + timedelta(minutes=235)}'": 9,
     }
     wait_until(
         lambda: all(query(sql) == [(count,)] for sql, count in expected.items()),
@@ -194,6 +203,100 @@ def test_port_arrivals_and_departures(played: datetime) -> None:
             assert e1 == "departure" or p1 == p2
 
 
+def test_ship_positions_hold_each_ships_last_report(played: datetime) -> None:
+    rows = query("select mmsi, ts from ship_positions order by mmsi")
+    last = {}
+    for message in traffic(played, 4):
+        if message["MessageType"] == "PositionReport":
+            last[message["MetaData"]["MMSI"]] = parse_aisstream_time(
+                message["MetaData"]["time_utc"]
+            )
+    assert dict(rows) == last
+
+
+@pytest.mark.parametrize(("name", "sql"), dashboard_queries())
+def test_every_dashboard_query_runs_as_grafana(played: datetime, name: str, sql: str) -> None:
+    with psycopg.connect(READER) as conn:
+        conn.execute(render(sql).encode()).fetchall()
+
+
+def map_rows() -> list[dict[str, Any]]:
+    (sql,) = [sql for name, sql in dashboard_queries() if name == "ais-traffic/Ships (latest)"]
+    with psycopg.connect(READER, row_factory=dict_row) as conn:
+        return conn.execute(render(sql).encode()).fetchall()
+
+
+def test_map_shows_every_ship(played: datetime) -> None:
+    """The traffic is two days old: the map is anchored on the data, not on the clock."""
+    rows = map_rows()
+    assert len(rows) == 9
+    assert {row["state"] for row in rows} <= {"moored", "under way", "jump"}
+
+
+def test_a_dark_ship_stays_on_the_map(played: datetime) -> None:
+    """A ship silent for an hour is past the map's 30-minute window, but an open dark
+    period keeps it there, in red. Its rows are removed afterwards; MMSI 999000001 is
+    never in Kafka, so Flink never touches them."""
+    ((anchor,),) = query("select max(ts) from ship_positions")
+    last_seen = anchor - timedelta(hours=1)
+    with psycopg.connect(POSTGRES) as conn:
+        conn.execute(
+            "insert into ship_positions (mmsi, ts, lat, lon, ship_name)"
+            " values (%s, %s, %s, %s, %s)",
+            (999000001, last_seen, 15.6, -61.5, "TEST DARK"),
+        )
+        conn.execute(
+            "insert into ship_sessions (mmsi, session_start, last_seen, ship_name, last_lat,"
+            " last_lon) values (%s, %s, %s, %s, %s, %s)",
+            (999000001, last_seen - timedelta(hours=1), last_seen, "TEST DARK", 15.6, -61.5),
+        )
+    try:
+        states = {row["mmsi"]: row["state"] for row in map_rows()}
+        assert states[999000001] == "dark"
+    finally:
+        with psycopg.connect(POSTGRES) as conn:
+            conn.execute("delete from ship_positions where mmsi = 999000001")
+            conn.execute("delete from ship_sessions where mmsi = 999000001")
+
+
+def prom(expr: str) -> list[dict[str, Any]]:
+    """Result of an instant PromQL query; an invalid query raises (HTTP 400)."""
+    url = f"{PROMETHEUS}/api/v1/query?" + urllib.parse.urlencode({"query": expr})
+    with urllib.request.urlopen(url, timeout=5) as response:
+        result: list[dict[str, Any]] = json.load(response)["data"]["result"]
+    return result
+
+
+def test_prometheus_sees_lag_and_flink(played: datetime) -> None:
+    """The lag comes from the broker (Kafka exporter), so it stays visible when the job is
+    down; Flink's own metrics come from its Prometheus reporter."""
+    wait_until(lambda: bool(prom('kafka_consumergroup_lag{consumergroup="flink-ais"}')), 120, "lag")
+    wait_until(lambda: bool(prom('{__name__=~"flink_.+"}')), 120, "Flink metrics")
+
+
+@pytest.mark.parametrize(("name", "expr"), prometheus_queries())
+def test_every_promql_query_is_valid(played: datetime, name: str, expr: str) -> None:
+    prom(expr)
+
+
+def test_schema_applies_again_on_an_existing_database(played: datetime) -> None:
+    """A PostgreSQL volume from an older version keeps its data but misses newer tables and
+    the Grafana role; the db-schema service, run on every start, must add them without
+    failing on what already exists."""
+    subprocess.run(
+        ["docker", "compose", "run", "--rm", "--no-deps", "db-schema"],
+        cwd=REPOSITORY,
+        check=True,
+        capture_output=True,
+    )
+    assert query("select count(*) from ship_positions") == [(9,)]
+
+
+def test_grafana_role_cannot_write(played: datetime) -> None:
+    with pytest.raises(psycopg.errors.InsufficientPrivilege), psycopg.connect(READER) as conn:
+        conn.execute("delete from port_events")
+
+
 def test_reprocessing_from_scratch_gives_the_same_results(played: datetime) -> None:
     """Cancel the job and submit it again: it re-reads Kafka from the earliest offset and
     recomputes every window. The sinks upsert on their primary key, so the tables come out
@@ -206,6 +309,7 @@ def test_reprocessing_from_scratch_gives_the_same_results(played: datetime) -> N
         f"select * from ais_gaps where silent_from >= '{played}' order by 1, 2",
         f"select * from position_jumps where to_time >= '{played}' order by 1, 3",
         f"select * from port_events where event_time >= '{played}' order by 1, 2",
+        "select * from ship_positions order by 1",
     ]
     before = [query(snapshot) for snapshot in snapshots]
 
@@ -216,6 +320,16 @@ def test_reprocessing_from_scratch_gives_the_same_results(played: datetime) -> N
             urllib.request.Request(f"{FLINK}/jobs/{jid}?mode=cancel", method="PATCH"), timeout=5
         )
     wait_until(lambda: not flink_job_running(), 60, "the job to stop")
+    # The lag is measured by the broker: it stays visible while the job is down.
+    stopped = time.time()
+    wait_until(
+        lambda: any(
+            float(series["value"][0]) > stopped + 15
+            for series in prom('kafka_consumergroup_lag{consumergroup="flink-ais"}')
+        ),
+        60,
+        "a lag sample taken while the job is stopped",
+    )
     submit_job()
     time.sleep(45)  # the new job re-reads the topic and rewrites the closed windows
 

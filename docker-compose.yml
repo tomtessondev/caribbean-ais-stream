@@ -89,12 +89,69 @@ services:
     ports:
       - "5434:5432"
     volumes:
-      - ./postgres/init.sql:/docker-entrypoint-initdb.d/init.sql:ro
       - postgres-data:/var/lib/postgresql/data
     healthcheck:
       test: ["CMD-SHELL", "pg_isready -U ais -d ais"]
       interval: 2s
       retries: 30
+    restart: unless-stopped
+
+  # Applies postgres/init.sql on every start, not only on an empty volume: a database from
+  # an older version gets the newer tables before the Flink job writes to them.
+  db-schema:
+    image: postgres:17.6
+    command: ["psql", "-v", "ON_ERROR_STOP=1", "-h", "postgres", "-U", "ais", "-d", "ais", "-f", "/init.sql"]
+    environment:
+      PGPASSWORD: ais
+      # Password of the read-only role Grafana uses.
+      GRAFANA_DB_PASSWORD: ${GRAFANA_DB_PASSWORD:-grafana-local}
+    volumes:
+      - ./postgres/init.sql:/init.sql:ro
+    depends_on:
+      postgres:
+        condition: service_healthy
+
+  # The broker's view for Prometheus: offsets per partition (throughput) and the lag of
+  # every consumer group, which stays measurable while a consumer is down.
+  kafka-exporter:
+    image: danielqsj/kafka-exporter:v1.9.0
+    command: ["--kafka.server=kafka:9092"]
+    depends_on:
+      kafka:
+        condition: service_healthy
+    restart: unless-stopped
+
+  prometheus:
+    image: prom/prometheus:v3.5.0
+    ports:
+      - "9090:9090"
+    volumes:
+      - ./prometheus/prometheus.yml:/etc/prometheus/prometheus.yml:ro
+      - prometheus-data:/prometheus
+    depends_on:
+      - kafka-exporter
+    restart: unless-stopped
+
+  # Map of the ships and stream health on http://localhost:3002 (3001 is taken by the
+  # sensor project's Grafana).
+  grafana:
+    image: grafana/grafana:12.3.0
+    environment:
+      GRAFANA_DB_PASSWORD: ${GRAFANA_DB_PASSWORD:-grafana-local}
+      GF_SECURITY_ADMIN_PASSWORD: ${GRAFANA_ADMIN_PASSWORD:-admin}
+      GF_ANALYTICS_REPORTING_ENABLED: "false"
+      # Local demo: dashboards readable without logging in; editing still needs admin.
+      GF_AUTH_ANONYMOUS_ENABLED: "true"
+      GF_AUTH_ANONYMOUS_ORG_ROLE: Viewer
+      GF_DASHBOARDS_DEFAULT_HOME_DASHBOARD_PATH: /var/lib/grafana/dashboards/ais-traffic.json
+    ports:
+      - "3002:3000"
+    volumes:
+      - ./grafana/provisioning:/etc/grafana/provisioning:ro
+      - ./grafana/dashboards:/var/lib/grafana/dashboards:ro
+    depends_on:
+      db-schema:
+        condition: service_completed_successfully
     restart: unless-stopped
 
   flink-jobmanager:
@@ -105,6 +162,8 @@ services:
       FLINK_PROPERTIES: |
         jobmanager.rpc.address: flink-jobmanager
         state.checkpoints.dir: file:///tmp/flink-checkpoints
+        metrics.reporter.prom.factory.class: org.apache.flink.metrics.prometheus.PrometheusReporterFactory
+        metrics.reporter.prom.port: 9249
     ports:
       - "8082:8081"   # Flink web UI on localhost:8082
     restart: unless-stopped
@@ -117,6 +176,8 @@ services:
       FLINK_PROPERTIES: |
         jobmanager.rpc.address: flink-jobmanager
         taskmanager.numberOfTaskSlots: 2
+        metrics.reporter.prom.factory.class: org.apache.flink.metrics.prometheus.PrometheusReporterFactory
+        metrics.reporter.prom.port: 9249
     depends_on:
       - flink-jobmanager
     restart: unless-stopped
@@ -133,11 +194,12 @@ services:
     depends_on:
       flink-taskmanager:
         condition: service_started
-      postgres:
-        condition: service_healthy
+      db-schema:
+        condition: service_completed_successfully
       topics:
         condition: service_completed_successfully
 
 volumes:
   kafka-data:
   postgres-data:
+  prometheus-data:

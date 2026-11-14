@@ -1,0 +1,161 @@
+{
+  "uid": "ais-traffic",
+  "title": "AIS traffic",
+  "description": "Ships around the Lesser Antilles from the Flink results. Panels titled 'latest' are anchored on the most recent position received, not on the clock, so they also work on a replay.",
+  "tags": ["ais", "flink"],
+  "timezone": "utc",
+  "editable": false,
+  "refresh": "10s",
+  "time": { "from": "now-6h", "to": "now" },
+  "schemaVersion": 41,
+  "panels": [
+    {
+      "id": 1,
+      "type": "geomap",
+      "title": "Ships (latest)",
+      "description": "Ships seen in the 30 minutes before the latest position, plus ships gone dark in the last 6 hours at their last known position. Red: dark. Orange: impossible jump in the last 30 minutes. Blue: moored or at anchor. Green: under way.",
+      "gridPos": { "x": 0, "y": 0, "w": 16, "h": 18 },
+      "datasource": { "type": "grafana-postgresql-datasource", "uid": "postgres" },
+      "targets": [
+        {
+          "refId": "A",
+          "datasource": { "type": "grafana-postgresql-datasource", "uid": "postgres" },
+          "format": "table",
+          "rawQuery": true,
+          "editorMode": "code",
+          "rawSql": "with anchor as (select max(ts) as t from ship_positions),\ndark as (\n  select mmsi from dark_periods, anchor\n  where silent_until is null and silent_from > anchor.t - interval '6 hours'\n),\njumped as (\n  select mmsi from position_jumps, anchor where to_time > anchor.t - interval '30 minutes'\n)\nselect\n  p.mmsi, p.ship_name as name, p.lat as latitude, p.lon as longitude,\n  p.sog_kn as speed_kn, p.nav_status, p.port,\n  case\n    when p.mmsi in (select mmsi from dark) then 'dark'\n    when p.mmsi in (select mmsi from jumped) then 'jump'\n    when p.nav_status in (1, 5) then 'moored'\n    else 'under way'\n  end as state\nfrom ship_positions p, anchor\nwhere p.ts > anchor.t - interval '30 minutes' or p.mmsi in (select mmsi from dark)\norder by p.mmsi"
+        }
+      ],
+      "fieldConfig": {
+        "defaults": {},
+        "overrides": [
+          {
+            "matcher": { "id": "byName", "options": "state" },
+            "properties": [
+              {
+                "id": "mappings",
+                "value": [
+                  {
+                    "type": "value",
+                    "options": {
+                      "dark": { "color": "red", "index": 0 },
+                      "jump": { "color": "orange", "index": 1 },
+                      "moored": { "color": "blue", "index": 2 },
+                      "under way": { "color": "green", "index": 3 }
+                    }
+                  }
+                ]
+              },
+              { "id": "color", "value": { "mode": "thresholds" } }
+            ]
+          }
+        ]
+      },
+      "options": {
+        "view": { "id": "coords", "lat": 15.3, "lon": -61.3, "zoom": 8 },
+        "controls": { "showZoom": true, "mouseWheelZoom": true, "showAttribution": true },
+        "basemap": { "type": "osm-standard", "name": "OpenStreetMap" },
+        "layers": [
+          {
+            "type": "markers",
+            "name": "Ships",
+            "tooltip": true,
+            "location": { "mode": "coords", "latitude": "latitude", "longitude": "longitude" },
+            "config": {
+              "showLegend": false,
+              "style": {
+                "size": { "fixed": 7 },
+                "color": { "field": "state", "fixed": "green" },
+                "opacity": 0.9,
+                "symbol": { "mode": "fixed", "fixed": "img/icons/marker/circle.svg" },
+                "text": { "mode": "field", "field": "name", "fixed": "" },
+                "textConfig": { "fontSize": 10, "offsetX": 0, "offsetY": -12, "textAlign": "center", "textBaseline": "middle" }
+              }
+            }
+          }
+        ],
+        "tooltip": { "mode": "details" }
+      }
+    },
+    {
+      "id": 2,
+      "type": "table",
+      "title": "Ships dark now (latest)",
+      "description": "Open AIS silences that started in the 6 hours before the latest position: no report for more than 15 minutes, and not back yet.",
+      "gridPos": { "x": 16, "y": 0, "w": 8, "h": 6 },
+      "datasource": { "type": "grafana-postgresql-datasource", "uid": "postgres" },
+      "targets": [
+        {
+          "refId": "A",
+          "datasource": { "type": "grafana-postgresql-datasource", "uid": "postgres" },
+          "format": "table",
+          "rawQuery": true,
+          "editorMode": "code",
+          "rawSql": "with anchor as (select max(ts) as t from ship_positions)\nselect\n  d.ship_name as ship, d.silent_from,\n  round(extract(epoch from anchor.t - d.silent_from) / 60) as minutes_silent\nfrom dark_periods d, anchor\nwhere d.silent_until is null and d.silent_from > anchor.t - interval '6 hours'\norder by d.silent_from"
+        }
+      ]
+    },
+    {
+      "id": 3,
+      "type": "table",
+      "title": "Impossible jumps (latest)",
+      "description": "Consecutive positions more than 1 nm apart at an implied speed above 60 knots, in the 30 minutes before the latest position.",
+      "gridPos": { "x": 16, "y": 6, "w": 8, "h": 6 },
+      "datasource": { "type": "grafana-postgresql-datasource", "uid": "postgres" },
+      "targets": [
+        {
+          "refId": "A",
+          "datasource": { "type": "grafana-postgresql-datasource", "uid": "postgres" },
+          "format": "table",
+          "rawQuery": true,
+          "editorMode": "code",
+          "rawSql": "with anchor as (select max(ts) as t from ship_positions)\nselect\n  j.to_time as time, j.ship_name as ship,\n  round(j.distance_nm::numeric, 1) as distance_nm,\n  round(j.implied_speed_kn::numeric) as implied_speed_kn\nfrom position_jumps j, anchor\nwhere j.to_time > anchor.t - interval '30 minutes'\norder by j.to_time desc"
+        }
+      ]
+    },
+    {
+      "id": 4,
+      "type": "table",
+      "title": "Port arrivals and departures (latest)",
+      "description": "The last 20 ships entering or leaving a port area.",
+      "gridPos": { "x": 16, "y": 12, "w": 8, "h": 6 },
+      "datasource": { "type": "grafana-postgresql-datasource", "uid": "postgres" },
+      "targets": [
+        {
+          "refId": "A",
+          "datasource": { "type": "grafana-postgresql-datasource", "uid": "postgres" },
+          "format": "table",
+          "rawQuery": true,
+          "editorMode": "code",
+          "rawSql": "select event_time as time, ship_name as ship, event, port\nfrom port_events\norder by event_time desc\nlimit 20"
+        }
+      ]
+    },
+    {
+      "id": 5,
+      "type": "timeseries",
+      "title": "Ships per port",
+      "description": "Distinct ships seen in each port area, per 5-minute window (port_activity).",
+      "gridPos": { "x": 0, "y": 18, "w": 24, "h": 8 },
+      "datasource": { "type": "grafana-postgresql-datasource", "uid": "postgres" },
+      "targets": [
+        {
+          "refId": "A",
+          "datasource": { "type": "grafana-postgresql-datasource", "uid": "postgres" },
+          "format": "time_series",
+          "rawQuery": true,
+          "editorMode": "code",
+          "rawSql": "select window_start as time, port as metric, ships as value\nfrom port_activity\nwhere $__timeFilter(window_start)\norder by 1"
+        }
+      ],
+      "fieldConfig": {
+        "defaults": {
+          "custom": { "drawStyle": "line", "lineInterpolation": "stepAfter", "fillOpacity": 10 },
+          "decimals": 0,
+          "min": 0
+        },
+        "overrides": []
+      }
+    }
+  ]
+}
