@@ -63,3 +63,19 @@ select
     s.last_lon
 from ship_sessions s
 left join ais_gaps g on g.mmsi = s.mmsi and g.silent_from = s.last_seen;
+
+-- Two consecutive positions of a ship too far apart for the time between them (> 1 nm at
+-- an implied speed > 60 knots): a spoofed or corrupted position.
+create table position_jumps (
+    mmsi             bigint      not null,
+    from_time        timestamptz not null,
+    to_time          timestamptz not null,
+    from_lat         double precision,
+    from_lon         double precision,
+    to_lat           double precision,
+    to_lon           double precision,
+    distance_nm      double precision not null,
+    implied_speed_kn double precision not null,
+    ship_name        text,
+    primary key (mmsi, to_time)
+);

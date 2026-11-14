@@ -119,6 +119,26 @@ CREATE TABLE ais_gaps (
     'password' = 'ais'
 );
 
+CREATE TABLE position_jumps (
+    mmsi             BIGINT,
+    from_time        TIMESTAMP(3),
+    to_time          TIMESTAMP(3),
+    from_lat         DOUBLE,
+    from_lon         DOUBLE,
+    to_lat           DOUBLE,
+    to_lon           DOUBLE,
+    distance_nm      DOUBLE,
+    implied_speed_kn DOUBLE,
+    ship_name        STRING,
+    PRIMARY KEY (mmsi, to_time) NOT ENFORCED
+) WITH (
+    'connector' = 'jdbc',
+    'url' = 'jdbc:postgresql://postgres:5432/ais',
+    'table-name' = 'position_jumps',
+    'username' = 'ais',
+    'password' = 'ais'
+);
+
 EXECUTE STATEMENT SET
 BEGIN
 
@@ -190,6 +210,49 @@ MATCH_RECOGNIZE (
     AFTER MATCH SKIP TO LAST B
     PATTERN (A B)
     DEFINE B AS TIMESTAMPDIFF(SECOND, A.event_time, B.event_time) > 15 * 60
+);
+
+-- Physically impossible jumps (spoofed or corrupted positions): two consecutive positions
+-- more than 1 nm apart at an implied speed above 60 knots, faster than any ship in the area
+-- (fast ferries do about 40). The 1 nm floor keeps GPS noise over short intervals out.
+-- Distance in nautical miles, flat-earth approximation (exact enough over these distances):
+-- 1 degree of latitude = 60 nm, a degree of longitude shrinks with cos(latitude). DEFINE
+-- cannot refer to MEASURES, so the formula is written twice. The elapsed time is at least
+-- 1 s, for two positions with the same timestamp. SKIP TO LAST B lets a spoofed position
+-- be the end of one jump and the start of the next (out, then back).
+INSERT INTO position_jumps
+SELECT
+    mmsi, from_time, to_time, from_lat, from_lon, to_lat, to_lon,
+    distance_nm, distance_nm * 3600 / elapsed_s, ship_name
+FROM positions
+MATCH_RECOGNIZE (
+    PARTITION BY mmsi
+    ORDER BY event_time
+    MEASURES
+        CAST(A.event_time AS TIMESTAMP(3)) AS from_time,
+        CAST(B.event_time AS TIMESTAMP(3)) AS to_time,
+        A.lat AS from_lat,
+        A.lon AS from_lon,
+        B.lat AS to_lat,
+        B.lon AS to_lon,
+        SQRT(
+            POWER((B.lat - A.lat) * 60, 2)
+            + POWER((B.lon - A.lon) * 60 * COS(RADIANS((A.lat + B.lat) / 2)), 2)
+        ) AS distance_nm,
+        CAST(GREATEST(TIMESTAMPDIFF(SECOND, A.event_time, B.event_time), 1) AS DOUBLE) AS elapsed_s,
+        B.ship_name AS ship_name
+    ONE ROW PER MATCH
+    AFTER MATCH SKIP TO LAST B
+    PATTERN (A B)
+    DEFINE B AS
+        SQRT(
+            POWER((B.lat - A.lat) * 60, 2)
+            + POWER((B.lon - A.lon) * 60 * COS(RADIANS((A.lat + B.lat) / 2)), 2)
+        ) > 1
+        AND SQRT(
+            POWER((B.lat - A.lat) * 60, 2)
+            + POWER((B.lon - A.lon) * 60 * COS(RADIANS((A.lat + B.lat) / 2)), 2)
+        ) * 3600 / GREATEST(TIMESTAMPDIFF(SECOND, A.event_time, B.event_time), 1) > 60
 );
 
 END;

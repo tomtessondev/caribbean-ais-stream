@@ -1,7 +1,8 @@
 """End to end on the Compose stack: producer → Kafka → Flink SQL → PostgreSQL.
 
-Needs the stack running (`make e2e-up`, as CI does) and is skipped otherwise. Synthetic
-traffic is aligned on whole hours so the expected windows are exact.
+Needs the stack running (`make e2e-up`, as CI does) and is skipped otherwise; the tests
+submit the Flink job themselves, after the traffic. Synthetic traffic is aligned on whole
+hours so the expected windows are exact.
 """
 
 from __future__ import annotations
@@ -55,6 +56,24 @@ def flink_job_running() -> bool:
     return any(j["name"] == "ais-port-activity" and j["state"] == "RUNNING" for j in jobs)
 
 
+def flink_cluster_up() -> bool:
+    try:
+        with urllib.request.urlopen(f"{FLINK}/overview", timeout=5) as response:
+            return bool(json.load(response)["taskmanagers"])
+    except OSError:
+        return False
+
+
+def submit_job() -> None:
+    subprocess.run(
+        ["docker", "compose", "run", "--rm", "--no-deps", "flink-jobs"],
+        cwd=REPOSITORY,
+        check=True,
+        capture_output=True,
+    )
+    wait_until(flink_job_running, 120, "the Flink job")
+
+
 def play(start: datetime, hours: float) -> int:
     producer = AisProducer(KAFKA)
     records = sum(handle(json.dumps(m), producer) for m in traffic(start, hours))
@@ -65,7 +84,7 @@ def play(start: datetime, hours: float) -> int:
 @pytest.fixture(scope="module")
 def played() -> datetime:
     try:
-        wait_until(flink_job_running, 180, "the Flink job")
+        wait_until(flink_cluster_up, 180, "the Flink cluster")
     except AssertionError:
         if os.getenv("CI"):
             raise  # in CI the stack must be there: never pass by skipping
@@ -73,6 +92,12 @@ def played() -> datetime:
     # Two days back, on a whole hour: windows are aligned and no live data overlaps.
     start = datetime.now(UTC).replace(minute=0, second=0, microsecond=0) - timedelta(days=2)
     play(start, hours=4)
+    # The job starts once the traffic is in Kafka, so it reads a backlog on every partition
+    # at once. Started first, it would wait with all partitions marked idle, the first
+    # partition read would push the watermark hours ahead alone, and the others' early
+    # positions would arrive late and be dropped.
+    if not flink_job_running():
+        submit_job()
     # The last hour stays open (the watermark never passes its end): three closed hours per ship.
     wait_until(
         lambda: (
@@ -134,6 +159,18 @@ def test_only_the_dark_ship_goes_dark(played: datetime) -> None:
     assert 44 < silent_minutes < 46
 
 
+def test_only_the_spoofed_position_jumps(played: datetime) -> None:
+    """OCEAN PEARL reports one position 30 nm off its track, at 1 h 30: a jump out and a
+    jump back. The dark ship's return and the anchored tanker's swinging are not jumps."""
+    rows = query(
+        "select mmsi, to_time, distance_nm, implied_speed_kn from position_jumps"
+        f" where to_time >= '{played}' order by to_time"
+    )
+    assert [mmsi for mmsi, *_ in rows] == [255000707, 255000707]
+    assert rows[0][1] - played == timedelta(hours=1, minutes=30)
+    assert all(25 < distance < 35 and speed > 60 for _, _, distance, speed in rows)
+
+
 def test_reprocessing_from_scratch_gives_the_same_results(played: datetime) -> None:
     """Cancel the job and submit it again: it re-reads Kafka from the earliest offset and
     recomputes every window. The sinks upsert on their primary key, so the tables come out
@@ -144,6 +181,7 @@ def test_reprocessing_from_scratch_gives_the_same_results(played: datetime) -> N
         f" where window_start >= '{played}' order by 1, 2",
         f"select * from ship_sessions where session_start >= '{played}' order by 1, 2",
         f"select * from ais_gaps where silent_from >= '{played}' order by 1, 2",
+        f"select * from position_jumps where to_time >= '{played}' order by 1, 3",
     ]
     before = [query(snapshot) for snapshot in snapshots]
 
@@ -154,13 +192,7 @@ def test_reprocessing_from_scratch_gives_the_same_results(played: datetime) -> N
             urllib.request.Request(f"{FLINK}/jobs/{jid}?mode=cancel", method="PATCH"), timeout=5
         )
     wait_until(lambda: not flink_job_running(), 60, "the job to stop")
-    subprocess.run(
-        ["docker", "compose", "run", "--rm", "--no-deps", "flink-jobs"],
-        cwd=REPOSITORY,
-        check=True,
-        capture_output=True,
-    )
-    wait_until(flink_job_running, 120, "the resubmitted job")
+    submit_job()
     time.sleep(45)  # the new job re-reads the topic and rewrites the closed windows
 
     assert [query(snapshot) for snapshot in snapshots] == before
