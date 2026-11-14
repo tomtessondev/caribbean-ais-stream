@@ -76,10 +76,10 @@ def played() -> datetime:
     # The last hour stays open (the watermark never passes its end): three closed hours per ship.
     wait_until(
         lambda: (
-            query(f"select count(*) from ship_hourly where window_start >= '{start}'") == [(24,)]
+            query(f"select count(*) from ship_hourly where window_start >= '{start}'") == [(27,)]
         ),
         180,
-        "24 hourly rows",
+        "27 hourly rows",
     )
     return start
 
@@ -89,7 +89,7 @@ def test_every_ship_gets_a_row_per_closed_hour(played: datetime) -> None:
         "select mmsi, count(*), min(window_start) from ship_hourly"
         f" where window_start >= '{played}' group by mmsi"
     )
-    assert len(rows) == 8
+    assert len(rows) == 9
     assert all(count == 3 and first == played for _, count, first in rows)
 
 
@@ -120,16 +120,32 @@ def test_port_activity_sees_every_harbour(played: datetime) -> None:
     assert ports["Fort-de-France"][1] >= 1  # the tanker at anchor in the bay
 
 
+def test_only_the_dark_ship_goes_dark(played: datetime) -> None:
+    """Moored ships report every 3 minutes and every ship's last session is still open
+    when the play ends: the only closed session is BLUE MERIDIAN's, before its silence."""
+    sessions = query(
+        f"select mmsi, count(*) from ship_sessions where session_start >= '{played}' group by mmsi"
+    )
+    assert sessions == [(341000505, 1)]
+    ((silent_from, silent_minutes),) = query(
+        f"select silent_from, silent_minutes from dark_periods where silent_from >= '{played}'"
+    )
+    assert timedelta(hours=1, minutes=59) < silent_from - played <= timedelta(hours=2)
+    assert 44 < silent_minutes < 46
+
+
 def test_reprocessing_from_scratch_gives_the_same_results(played: datetime) -> None:
     """Cancel the job and submit it again: it re-reads Kafka from the earliest offset and
     recomputes every window. The sinks upsert on their primary key, so the tables come out
     identical, with no duplicate. (Re-sending the same traffic instead would prove nothing:
     events older than the watermark are late and dropped before any window.)"""
-    snapshot = (
+    snapshots = [
         "select port, window_start, ships, moored, positions from port_activity"
-        f" where window_start >= '{played}' order by 1, 2"
-    )
-    before = query(snapshot)
+        f" where window_start >= '{played}' order by 1, 2",
+        f"select * from ship_sessions where session_start >= '{played}' order by 1, 2",
+        f"select * from ais_gaps where silent_from >= '{played}' order by 1, 2",
+    ]
+    before = [query(snapshot) for snapshot in snapshots]
 
     with urllib.request.urlopen(f"{FLINK}/jobs/overview", timeout=5) as response:
         running = [j["jid"] for j in json.load(response)["jobs"] if j["state"] == "RUNNING"]
@@ -147,4 +163,4 @@ def test_reprocessing_from_scratch_gives_the_same_results(played: datetime) -> N
     wait_until(flink_job_running, 120, "the resubmitted job")
     time.sleep(45)  # the new job re-reads the topic and rewrites the closed windows
 
-    assert query(snapshot) == before
+    assert [query(snapshot) for snapshot in snapshots] == before

@@ -1,5 +1,5 @@
 -- Flink SQL jobs on the AIS position stream, submitted by the `flink-jobs` Compose service.
--- Both run in one streaming job (statement set) reading ais.positions once.
+-- All run in one streaming job (statement set) reading ais.positions once.
 
 -- Window boundaries are written as UTC wall-clock times.
 SET 'table.local-time-zone' = 'UTC';
@@ -84,6 +84,41 @@ CREATE TABLE ship_hourly (
     'password' = 'ais'
 );
 
+CREATE TABLE ship_sessions (
+    mmsi          BIGINT,
+    session_start TIMESTAMP(3),
+    last_seen     TIMESTAMP(3),
+    ship_name     STRING,
+    last_lat      DOUBLE,
+    last_lon      DOUBLE,
+    PRIMARY KEY (mmsi, session_start) NOT ENFORCED
+) WITH (
+    'connector' = 'jdbc',
+    'url' = 'jdbc:postgresql://postgres:5432/ais',
+    'table-name' = 'ship_sessions',
+    'username' = 'ais',
+    'password' = 'ais'
+);
+
+CREATE TABLE ais_gaps (
+    mmsi           BIGINT,
+    silent_from    TIMESTAMP(3),
+    silent_until   TIMESTAMP(3),
+    silent_minutes DOUBLE,
+    from_lat       DOUBLE,
+    from_lon       DOUBLE,
+    to_lat         DOUBLE,
+    to_lon         DOUBLE,
+    ship_name      STRING,
+    PRIMARY KEY (mmsi, silent_from) NOT ENFORCED
+) WITH (
+    'connector' = 'jdbc',
+    'url' = 'jdbc:postgresql://postgres:5432/ais',
+    'table-name' = 'ais_gaps',
+    'username' = 'ais',
+    'password' = 'ais'
+);
+
 EXECUTE STATEMENT SET
 BEGIN
 
@@ -115,5 +150,46 @@ SELECT
     LAST_VALUE(lon)
 FROM TABLE(TUMBLE(TABLE positions, DESCRIPTOR(event_time), INTERVAL '1' HOUR))
 GROUP BY mmsi, window_start, window_end;
+
+-- Ships going dark: a session window per ship closes after 15 minutes without a position,
+-- so its row is the alert, written 15 minutes after the last report. Ships under way report
+-- every few seconds and moored ones every 3 minutes: 15 minutes is at least five missed
+-- reports. Window deduplication keeps the session's last position (an aggregation could
+-- not: session windows merge, and LAST_VALUE cannot be merged).
+INSERT INTO ship_sessions
+SELECT mmsi, window_start, CAST(event_time AS TIMESTAMP(3)), ship_name, lat, lon
+FROM (
+    SELECT
+        *,
+        ROW_NUMBER() OVER (
+            PARTITION BY mmsi, window_start, window_end ORDER BY event_time DESC
+        ) AS rn
+    FROM TABLE(SESSION(TABLE positions PARTITION BY mmsi, DESCRIPTOR(event_time), INTERVAL '15' MINUTES))
+)
+WHERE rn = 1;
+
+-- The end of a silence: two consecutive positions of a ship more than 15 minutes apart,
+-- written as soon as the ship reports again. (The session it starts is only written when
+-- it ends, possibly days later.)
+INSERT INTO ais_gaps
+SELECT mmsi, silent_from, silent_until, silent_minutes, from_lat, from_lon, to_lat, to_lon, ship_name
+FROM positions
+MATCH_RECOGNIZE (
+    PARTITION BY mmsi
+    ORDER BY event_time
+    MEASURES
+        CAST(A.event_time AS TIMESTAMP(3)) AS silent_from,
+        CAST(B.event_time AS TIMESTAMP(3)) AS silent_until,
+        CAST(TIMESTAMPDIFF(SECOND, A.event_time, B.event_time) AS DOUBLE) / 60 AS silent_minutes,
+        A.lat AS from_lat,
+        A.lon AS from_lon,
+        B.lat AS to_lat,
+        B.lon AS to_lon,
+        B.ship_name AS ship_name
+    ONE ROW PER MATCH
+    AFTER MATCH SKIP TO LAST B
+    PATTERN (A B)
+    DEFINE B AS TIMESTAMPDIFF(SECOND, A.event_time, B.event_time) > 15 * 60
+);
 
 END;

@@ -23,3 +23,43 @@ create table ship_hourly (
     last_lon     double precision,
     primary key (mmsi, window_start)
 );
+
+-- A ship's reporting session: positions no more than 15 minutes apart. A row is written 15
+-- minutes after the last position, which is the "went dark" alert.
+create table ship_sessions (
+    mmsi          bigint      not null,
+    session_start timestamptz not null,
+    last_seen     timestamptz not null,  -- last position before the silence
+    ship_name     text,
+    last_lat      double precision,
+    last_lon      double precision,
+    primary key (mmsi, session_start)
+);
+
+-- Two consecutive positions of a ship more than 15 minutes apart, written when the ship
+-- reports again.
+create table ais_gaps (
+    mmsi           bigint      not null,
+    silent_from    timestamptz not null,
+    silent_until   timestamptz not null,
+    silent_minutes double precision not null,
+    from_lat       double precision,
+    from_lon       double precision,
+    to_lat         double precision,
+    to_lon         double precision,
+    ship_name      text,
+    primary key (mmsi, silent_from)
+);
+
+-- Every silence: when it started and where, and when it ended (null while still dark).
+create view dark_periods as
+select
+    s.mmsi,
+    s.ship_name,
+    s.last_seen as silent_from,
+    g.silent_until,
+    g.silent_minutes,
+    s.last_lat,
+    s.last_lon
+from ship_sessions s
+left join ais_gaps g on g.mmsi = s.mmsi and g.silent_from = s.last_seen;
