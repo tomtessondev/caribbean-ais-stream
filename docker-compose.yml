@@ -27,6 +27,9 @@ services:
       KAFKA_TRANSACTION_STATE_LOG_MIN_ISR: "1"
       KAFKA_GROUP_INITIAL_REBALANCE_DELAY_MS: "0"
       KAFKA_AUTO_CREATE_TOPICS_ENABLE: "false"
+      # The image defaults to /tmp: without this the volume below stays empty and every
+      # `docker compose down` silently wipes the topics.
+      KAFKA_LOG_DIRS: /var/lib/kafka/data
     ports:
       - "9094:9094"
     volumes:
@@ -77,5 +80,64 @@ services:
         condition: service_healthy
     restart: unless-stopped
 
+  postgres:
+    image: postgres:17.6
+    environment:
+      POSTGRES_USER: ais
+      POSTGRES_PASSWORD: ais
+      POSTGRES_DB: ais
+    ports:
+      - "5434:5432"
+    volumes:
+      - ./postgres/init.sql:/docker-entrypoint-initdb.d/init.sql:ro
+      - postgres-data:/var/lib/postgresql/data
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U ais -d ais"]
+      interval: 2s
+      retries: 30
+    restart: unless-stopped
+
+  flink-jobmanager:
+    build: ./flink
+    image: caribbean-ais-flink
+    command: ["jobmanager"]
+    environment:
+      FLINK_PROPERTIES: |
+        jobmanager.rpc.address: flink-jobmanager
+        state.checkpoints.dir: file:///tmp/flink-checkpoints
+    ports:
+      - "8082:8081"   # Flink web UI on localhost:8082
+    restart: unless-stopped
+
+  flink-taskmanager:
+    build: ./flink
+    image: caribbean-ais-flink
+    command: ["taskmanager"]
+    environment:
+      FLINK_PROPERTIES: |
+        jobmanager.rpc.address: flink-jobmanager
+        taskmanager.numberOfTaskSlots: 2
+    depends_on:
+      - flink-jobmanager
+    restart: unless-stopped
+
+  # Submits flink/sql/ais_jobs.sql once; the job then runs on the cluster.
+  flink-jobs:
+    build: ./flink
+    image: caribbean-ais-flink
+    command: ["bin/sql-client.sh", "-f", "/opt/flink/sql/ais_jobs.sql"]
+    environment:
+      FLINK_PROPERTIES: |
+        jobmanager.rpc.address: flink-jobmanager
+        rest.address: flink-jobmanager
+    depends_on:
+      flink-taskmanager:
+        condition: service_started
+      postgres:
+        condition: service_healthy
+      topics:
+        condition: service_completed_successfully
+
 volumes:
   kafka-data:
+  postgres-data:

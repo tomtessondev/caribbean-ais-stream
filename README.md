@@ -3,7 +3,8 @@
 Real-time ship traffic around the **Lesser Antilles**, from the AIS radio broadcasts of
 every large ship to **Kafka**, then **Flink**. Ships report their position every few
 seconds under way and their identity every six minutes; this project turns that stream into
-clean, keyed Kafka records, and (next) into port activity and anomaly detection with Flink.
+clean, keyed Kafka records, then Flink SQL turns those into port activity and per-ship
+statistics on event-time windows, upserted into PostgreSQL.
 
 Third piece of a portfolio on the same islands, after
 [antilles-data-pipeline](https://github.com/tomtessondev/antilles-data-pipeline) (batch) and
@@ -16,7 +17,9 @@ Third piece of a portfolio on the same islands, after
  recording (JSON lines) ───┼─► normalise (pydantic) ──────┼─► ais.ships       (compacted: latest per ship)
  synthetic traffic ────────┘   AIS sentinels → null       └─► ais.dlq         (rejects, verbatim)
                                                                    │
-                                                          Flink SQL (roadmap step 2)
+                                     Flink SQL: event time, watermark 30 s, idle partitions
+                                       ├─ tumbling 5 min per port area ──► port_activity  (PostgreSQL,
+                                       └─ tumbling 1 h per ship ──────────► ship_hourly     upserted)
 ```
 
 | Part | Tooling | Where |
@@ -25,15 +28,21 @@ Third piece of a portfolio on the same islands, after
 | Sources | aisstream.io client with reconnection, replay of recordings | `src/ais_stream/sources.py` |
 | Producer | confluent-kafka: keyed, idempotent, acks=all, zstd | `src/ais_stream/kafka.py`, `pipeline.py` |
 | Synthetic traffic | Ferries, cargo, cruise, tanker at anchor, fishing boats, a ship going dark | `src/ais_stream/synthetic.py` |
-| Platform | Kafka 3.9 (KRaft, single node), Kafka UI, Docker Compose | `docker-compose.yml` |
-| Quality | pytest (unit, a fake WebSocket server, a real Kafka), ruff, mypy `--strict` | `tests/`, `.github/workflows/ci.yml` |
+| Stream processing | Flink 1.20 SQL: Kafka source, window TVFs, JDBC/PostgreSQL upsert sinks | `flink/sql/ais_jobs.sql`, `flink/Dockerfile`, `postgres/init.sql` |
+| Platform | Kafka 3.9 (KRaft, single node), Kafka UI, Flink, PostgreSQL, Docker Compose | `docker-compose.yml` |
+| Quality | pytest (unit, a fake WebSocket server, a real Kafka, end to end through Flink), ruff, mypy `--strict` | `tests/`, `.github/workflows/ci.yml` |
 
 ## Quick start
 
 ```bash
-docker compose up -d --build     # Kafka, topics, synthetic ships at the real pace, Kafka UI
-open http://localhost:8088       # topics, partitions, messages
+docker compose up -d --build     # Kafka, Flink, PostgreSQL, synthetic ships at the real pace
+open http://localhost:8088       # Kafka UI: topics, partitions, messages
+open http://localhost:8082       # Flink UI: the running job, watermarks, checkpoints
+docker compose exec postgres psql -U ais -c "select * from port_activity order by window_start desc limit 10"
 ```
+
+Windows close as event time moves on: the first 5-minute port windows appear about five
+minutes after start.
 
 With the real feed (free key from [aisstream.io](https://aisstream.io)):
 
@@ -49,6 +58,7 @@ python -m venv .venv && source .venv/bin/activate
 make install        # pip install -e ".[dev]"
 make check          # ruff, mypy, unit tests
 make integration    # tests against a real Kafka broker (needs Docker)
+make e2e-up e2e     # fresh Kafka + Flink + PostgreSQL, then the end-to-end tests
 ais-stream synthesize --hours 6 --out data/sample.jsonl
 ais-stream replay data/sample.jsonl --bootstrap localhost:9094
 ```
@@ -71,6 +81,22 @@ ais-stream replay data/sample.jsonl --bootstrap localhost:9094
   a ship whose AIS goes silent for 45 minutes, the case the anomaly stage must catch.
 - **A broken key stops the producer.** aisstream answers an invalid key with an error
   message instead of data; the producer raises instead of filling the dead-letter topic.
+- **Event time, not arrival time.** Windows use the time the ship sent the position, with a
+  30-second watermark for out-of-order messages. Three partitions and a handful of ships
+  mean some partitions go quiet; without `table.exec.source.idle-timeout` a silent
+  partition would hold the watermark back and no window would ever close.
+- **Port areas in the query, not in a join.** A regular join with a table of ports would
+  drop the event-time attribute that windows need; a `CASE` over boxes around each harbour
+  keeps it.
+- **Results that survive a restart.** Each sink table has the primary key Flink upserts on.
+  The end-to-end test cancels the job, submits it again from the earliest offset, and
+  checks the tables come out identical. Re-sending the same traffic would not test this:
+  events older than the watermark are late and dropped, which the first version of the
+  test learned the hard way.
+- **Two infrastructure traps, now written down.** The Kafka connector does not bundle the
+  zstd codec the producer uses (the Flink image adds `zstd-jni`), and the `apache/kafka`
+  image writes to `/tmp` unless `KAFKA_LOG_DIRS` points at the volume, so a
+  `docker compose down` silently emptied the topics.
 
 ## Roadmap
 
