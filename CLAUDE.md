@@ -22,11 +22,17 @@ count. Every change should be something a recruiter can read.
 - Flink 1.20 SQL (`flink/sql/ais_jobs.sql`, image `flink/Dockerfile` with Kafka, JDBC,
   PostgreSQL and zstd jars) → PostgreSQL tables in `postgres/init.sql` (primary keys =
   upsert keys): `port_activity`, `ship_hourly`, and the anomalies `ship_sessions` +
-  `ais_gaps` (view `dark_periods`), `position_jumps`, `port_events`. Event time +
+  `ais_gaps` (view `dark_periods`), `position_jumps`, `port_events`, and `ship_positions`
+  (latest position per ship, for the map). Event time +
   watermarks: old events are late and dropped, so e2e tests need a fresh stack
   (`make e2e-up`, which does not submit the job: the tests submit it after their traffic).
 - pytest (unit; `e2e` marked tests on the Compose stack; integration marked `integration` with a real `apache/kafka` broker started
   by the `kafka` fixture), ruff, mypy --strict
+- Grafana 12.3 on localhost:3002 (`grafana/`: provisioning + dashboard JSON, the source of
+  truth; reads PostgreSQL as `grafana_reader`, select only, password `GRAFANA_DB_PASSWORD`),
+  Prometheus on localhost:9090 (`prometheus/prometheus.yml`) scraping `kafka-exporter` and
+  Flink's reporter (port 9249). `tests/grafana_queries.py` extracts the dashboard queries;
+  the e2e tests run them. Images in `docs/images/` (how to redo them: its README).
 
 ## Commands
 
@@ -35,6 +41,8 @@ python -m venv .venv && source .venv/bin/activate
 make install / check / integration
 make up            # Kafka + synthetic demo + Kafka UI (localhost:8088)
 make live          # real feed, needs AISSTREAM_API_KEY in .env (never commit it)
+make e2e-up e2e    # fresh stack, then the end-to-end tests
+make fast-replay   # fresh stack, six hours of traffic replayed sixty times faster
 ```
 
 ## Rules

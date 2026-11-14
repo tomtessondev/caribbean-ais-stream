@@ -69,17 +69,11 @@
     {
       "id": 4,
       "type": "timeseries",
-      "title": "Event-time lag",
-      "description": "How old a position is when the Flink source emits it, and how far the watermark is behind the clock. On live traffic both stay around the 30-second watermark delay; on a replay of old traffic they are hours.",
+      "title": "Watermark behind the clock",
+      "description": "How far the event-time watermark of the Flink source is behind the wall clock. On live traffic it stays around the 30-second out-of-order allowance; on a replay of old traffic it starts hours behind and catches up.",
       "gridPos": { "x": 12, "y": 8, "w": 12, "h": 8 },
       "datasource": { "type": "prometheus", "uid": "prometheus" },
       "targets": [
-        {
-          "refId": "A",
-          "datasource": { "type": "prometheus", "uid": "prometheus" },
-          "expr": "max(flink_taskmanager_job_task_operator_currentEmitEventTimeLag{operator_name=~\"Source:_positions.*\"}) / 1000",
-          "legendFormat": "position age at the source"
-        },
         {
           "refId": "B",
           "datasource": { "type": "prometheus", "uid": "prometheus" },
@@ -132,7 +126,20 @@
           "expr": "sum(kafka_consumergroup_lag{consumergroup=\"flink-ais\"})"
         }
       ],
-      "fieldConfig": { "defaults": { "unit": "short" }, "overrides": [] }
+      "fieldConfig": {
+        "defaults": {
+          "unit": "short",
+          "thresholds": {
+            "mode": "absolute",
+            "steps": [
+              { "color": "green", "value": null },
+              { "color": "orange", "value": 5000 },
+              { "color": "red", "value": 50000 }
+            ]
+          }
+        },
+        "overrides": []
+      }
     }
   ]
 }

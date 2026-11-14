@@ -91,7 +91,7 @@
           "format": "table",
           "rawQuery": true,
           "editorMode": "code",
-          "rawSql": "with anchor as (select max(ts) as t from ship_positions)\nselect\n  d.ship_name as ship, d.mmsi, d.silent_from,\n  round(extract(epoch from anchor.t - d.silent_from) / 60) as minutes_silent\nfrom dark_periods d, anchor\nwhere d.silent_until is null and d.silent_from > anchor.t - interval '6 hours'\norder by d.silent_from"
+          "rawSql": "with anchor as (select max(ts) as t from ship_positions)\nselect\n  d.ship_name as ship, d.silent_from,\n  round(extract(epoch from anchor.t - d.silent_from) / 60) as minutes_silent\nfrom dark_periods d, anchor\nwhere d.silent_until is null and d.silent_from > anchor.t - interval '6 hours'\norder by d.silent_from"
         }
       ]
     },
@@ -109,7 +109,7 @@
           "format": "table",
           "rawQuery": true,
           "editorMode": "code",
-          "rawSql": "with anchor as (select max(ts) as t from ship_positions)\nselect\n  j.to_time as time, j.ship_name as ship, j.mmsi,\n  round(j.distance_nm::numeric, 1) as distance_nm,\n  round(j.implied_speed_kn::numeric) as implied_speed_kn\nfrom position_jumps j, anchor\nwhere j.to_time > anchor.t - interval '30 minutes'\norder by j.to_time desc"
+          "rawSql": "with anchor as (select max(ts) as t from ship_positions)\nselect\n  j.to_time as time, j.ship_name as ship,\n  round(j.distance_nm::numeric, 1) as distance_nm,\n  round(j.implied_speed_kn::numeric) as implied_speed_kn\nfrom position_jumps j, anchor\nwhere j.to_time > anchor.t - interval '30 minutes'\norder by j.to_time desc"
         }
       ]
     },
@@ -127,7 +127,7 @@
           "format": "table",
           "rawQuery": true,
           "editorMode": "code",
-          "rawSql": "select event_time as time, ship_name as ship, event, port, round(sog_kn::numeric, 1) as speed_kn\nfrom port_events\norder by event_time desc\nlimit 20"
+          "rawSql": "select event_time as time, ship_name as ship, event, port\nfrom port_events\norder by event_time desc\nlimit 20"
         }
       ]
     },

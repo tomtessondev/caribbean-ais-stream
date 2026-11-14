@@ -5,7 +5,9 @@ every large ship to **Kafka**, then **Flink**. Ships report their position every
 seconds under way and their identity every six minutes; this project turns that stream into
 clean, keyed Kafka records, then Flink SQL turns those into port activity, per-ship
 statistics and anomalies (ships going dark, impossible position jumps, port arrivals and
-departures) on event time, upserted into PostgreSQL.
+departures) on event time, upserted into PostgreSQL, shown on a live map in Grafana.
+
+![Ships moving on the Grafana map during a replay sixty times faster; BLUE MERIDIAN turns red while its AIS is silent](docs/images/ships.gif)
 
 Third piece of a portfolio on the same islands, after
 [antilles-data-pipeline](https://github.com/tomtessondev/antilles-data-pipeline) (batch) and
@@ -24,7 +26,11 @@ Third piece of a portfolio on the same islands, after
                                        ├─ session 15 min per ship ────────► ship_sessions ┐
                                        ├─ MATCH_RECOGNIZE: gap > 15 min ──► ais_gaps ─────┴► dark_periods (view)
                                        ├─ MATCH_RECOGNIZE: > 60 kn ───────► position_jumps
-                                       └─ MATCH_RECOGNIZE: in/out of port ► port_events
+                                       ├─ MATCH_RECOGNIZE: in/out of port ► port_events
+                                       └─ every position (upsert) ────────► ship_positions
+                                                                                 │
+ Kafka exporter (offsets, consumer lag) ─┐                                       │ read-only role
+ Flink reporter (records/s, watermark) ──┴─► Prometheus ──────────────────► Grafana: map, stream health
 ```
 
 | Part | Tooling | Where |
@@ -34,6 +40,8 @@ Third piece of a portfolio on the same islands, after
 | Producer | confluent-kafka: keyed, idempotent, acks=all, zstd | `src/ais_stream/kafka.py`, `pipeline.py` |
 | Synthetic traffic | Ferries, cargo, cruise, tanker at anchor, fishing boats, a ship going dark, a spoofed position | `src/ais_stream/synthetic.py` |
 | Stream processing | Flink 1.20 SQL: Kafka source, window TVFs (tumbling, session), `MATCH_RECOGNIZE`, JDBC/PostgreSQL upsert sinks | `flink/sql/ais_jobs.sql`, `flink/Dockerfile`, `postgres/init.sql` |
+| Dashboards | Grafana 12 provisioned as code: geomap of the ships, anomalies, port activity, stream health | `grafana/` |
+| Metrics | Prometheus scraping a Kafka exporter (broker view) and Flink's Prometheus reporter (job view) | `prometheus/prometheus.yml` |
 | Platform | Kafka 3.9 (KRaft, single node), Kafka UI, Flink, PostgreSQL, Docker Compose | `docker-compose.yml` |
 | Quality | pytest (unit, a fake WebSocket server, a real Kafka, end to end through Flink), ruff, mypy `--strict` | `tests/`, `.github/workflows/ci.yml` |
 
@@ -43,11 +51,38 @@ Third piece of a portfolio on the same islands, after
 docker compose up -d --build     # Kafka, Flink, PostgreSQL, synthetic ships at the real pace
 open http://localhost:8088       # Kafka UI: topics, partitions, messages
 open http://localhost:8082       # Flink UI: the running job, watermarks, checkpoints
+open http://localhost:3002       # Grafana: map of the ships, stream health (no login)
+open http://localhost:9090       # Prometheus
 docker compose exec postgres psql -U ais -c "select * from port_activity order by window_start desc limit 10"
 ```
 
 Windows close as event time moves on: the first 5-minute port windows appear about five
-minutes after start.
+minutes after start. A PostgreSQL volume from before the Grafana role existed lacks it:
+`docker compose down -v` recreates the database. `make fast-replay` plays six hours of
+traffic sixty times faster on a fresh stack, to see the ships move.
+
+## Map and metrics
+
+Two Grafana dashboards, provisioned from `grafana/` (the JSON files are the source of truth;
+edits in the UI are not kept):
+
+- **AIS traffic**: the ships at their latest position (red: dark, orange: impossible jump in
+  the last 30 minutes, blue: moored or at anchor, green: under way), the ships dark now, the
+  latest jumps and port arrivals and departures, and the ships per port over time. Panels
+  marked "latest" are anchored on the most recent position received, not on the clock, so
+  they also work on a replay. Grafana reads PostgreSQL with a role that can only select.
+- **Stream health**: messages per second per topic, the Flink consumer lag per partition,
+  positions read by Flink per second, how far the watermark is behind the clock, dead
+  letters. The lag comes from the broker (Kafka exporter), so it stays visible while the job
+  is down; Flink commits its offsets on checkpoints, so it moves in 30-second steps.
+
+![AIS traffic dashboard: map, ships dark now, port events, ships per port](docs/images/ais-traffic.png)
+
+![Stream health dashboard: throughput, consumer lag, watermark](docs/images/stream-health.png)
+
+The end-to-end tests run every SQL query of the dashboards as Grafana's role, check that a
+dark ship stays on the map, and validate every PromQL query against Prometheus.
+[docs/images/README.md](docs/images/README.md) explains how to redo the images.
 
 ## Anomaly detection
 
