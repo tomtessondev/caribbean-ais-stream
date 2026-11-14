@@ -77,5 +77,5 @@ def test_synthetic_hour_lands_in_kafka_in_per_ship_order(kafka: str) -> None:
     for key, value in positions:
         assert key == str(value["mmsi"])
         by_ship[key].append(value["ts"])
-    assert len(by_ship) == 8
+    assert len(by_ship) == 9
     assert all(times == sorted(times) for times in by_ship.values())
