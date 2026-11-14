@@ -90,3 +90,17 @@ create table port_events (
     sog_kn     double precision,
     primary key (mmsi, event_time)
 );
+
+-- The latest position of each ship, for the map.
+create table ship_positions (
+    mmsi        bigint      primary key,
+    ts          timestamptz not null,
+    lat         double precision,
+    lon         double precision,
+    sog_kn      double precision,
+    cog_deg     double precision,
+    heading_deg integer,
+    nav_status  integer,
+    ship_name   text,
+    port        text  -- port area the ship is in, if any
+);

@@ -22,6 +22,7 @@ import psycopg
 import pytest
 
 from ais_stream.kafka import AisProducer
+from ais_stream.messages import parse_aisstream_time
 from ais_stream.pipeline import handle
 from ais_stream.synthetic import traffic
 
@@ -106,6 +107,8 @@ def played() -> datetime:
         f"select count(*) from port_events where event_time >= '{start}'": 12,
         f"select count(*) from position_jumps where to_time >= '{start}'": 2,
         f"select count(*) from ais_gaps where silent_from >= '{start}'": 1,
+        # Every ship reports until the end of the play: its row holds one of the last minutes.
+        f"select count(*) from ship_positions where ts > '{start + timedelta(minutes=235)}'": 9,
     }
     wait_until(
         lambda: all(query(sql) == [(count,)] for sql, count in expected.items()),
@@ -194,6 +197,17 @@ def test_port_arrivals_and_departures(played: datetime) -> None:
             assert e1 == "departure" or p1 == p2
 
 
+def test_ship_positions_hold_each_ships_last_report(played: datetime) -> None:
+    rows = query("select mmsi, ts from ship_positions order by mmsi")
+    last = {}
+    for message in traffic(played, 4):
+        if message["MessageType"] == "PositionReport":
+            last[message["MetaData"]["MMSI"]] = parse_aisstream_time(
+                message["MetaData"]["time_utc"]
+            )
+    assert dict(rows) == last
+
+
 def test_reprocessing_from_scratch_gives_the_same_results(played: datetime) -> None:
     """Cancel the job and submit it again: it re-reads Kafka from the earliest offset and
     recomputes every window. The sinks upsert on their primary key, so the tables come out
@@ -206,6 +220,7 @@ def test_reprocessing_from_scratch_gives_the_same_results(played: datetime) -> N
         f"select * from ais_gaps where silent_from >= '{played}' order by 1, 2",
         f"select * from position_jumps where to_time >= '{played}' order by 1, 3",
         f"select * from port_events where event_time >= '{played}' order by 1, 2",
+        "select * from ship_positions order by 1",
     ]
     before = [query(snapshot) for snapshot in snapshots]
 

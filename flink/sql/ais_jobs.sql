@@ -155,6 +155,26 @@ CREATE TABLE port_events (
     'password' = 'ais'
 );
 
+CREATE TABLE ship_positions (
+    mmsi        BIGINT,
+    ts          TIMESTAMP(3),
+    lat         DOUBLE,
+    lon         DOUBLE,
+    sog_kn      DOUBLE,
+    cog_deg     DOUBLE,
+    heading_deg INT,
+    nav_status  INT,
+    ship_name   STRING,
+    port        STRING,
+    PRIMARY KEY (mmsi) NOT ENFORCED
+) WITH (
+    'connector' = 'jdbc',
+    'url' = 'jdbc:postgresql://postgres:5432/ais',
+    'table-name' = 'ship_positions',
+    'username' = 'ais',
+    'password' = 'ais'
+);
+
 EXECUTE STATEMENT SET
 BEGIN
 
@@ -311,5 +331,15 @@ MATCH_RECOGNIZE (
         INSIDE AS INSIDE.port IS NOT NULL,
         OUTSIDE AS OUTSIDE.port IS NULL
 );
+
+-- The latest position of each ship, for the map: an upsert of every position. The JDBC
+-- sink keeps the last row per ship between flushes (every second), so PostgreSQL sees at
+-- most one write per ship and second. A position arriving out of order can show an older
+-- point until the ship's next report, seconds later: harmless on a map.
+INSERT INTO ship_positions
+SELECT
+    mmsi, CAST(event_time AS TIMESTAMP(3)), lat, lon, sog_kn, cog_deg, heading_deg,
+    nav_status, ship_name, port
+FROM positions_in_port;
 
 END;
