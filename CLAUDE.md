@@ -21,8 +21,10 @@ count. Every change should be something a recruiter can read.
 - Kafka 3.9 KRaft (`apache/kafka`), Kafka UI, Docker Compose
 - Flink 1.20 SQL (`flink/sql/ais_jobs.sql`, image `flink/Dockerfile` with Kafka, JDBC,
   PostgreSQL and zstd jars) → PostgreSQL tables in `postgres/init.sql` (primary keys =
-  upsert keys). Event time + watermarks: old events are late and dropped, so e2e tests
-  need a fresh stack (`make e2e-up`).
+  upsert keys): `port_activity`, `ship_hourly`, and the anomalies `ship_sessions` +
+  `ais_gaps` (view `dark_periods`), `position_jumps`, `port_events`. Event time +
+  watermarks: old events are late and dropped, so e2e tests need a fresh stack
+  (`make e2e-up`, which does not submit the job: the tests submit it after their traffic).
 - pytest (unit; `e2e` marked tests on the Compose stack; integration marked `integration` with a real `apache/kafka` broker started
   by the `kafka` fixture), ruff, mypy --strict
 
