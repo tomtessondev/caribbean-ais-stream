@@ -57,9 +57,11 @@ docker compose exec postgres psql -U ais -c "select * from port_activity order b
 ```
 
 Windows close as event time moves on: the first 5-minute port windows appear about five
-minutes after start. A PostgreSQL volume from before the Grafana role existed lacks it:
-`docker compose down -v` recreates the database. `make fast-replay` plays six hours of
-traffic sixty times faster on a fresh stack, to see the ships move.
+minutes after start. The `db-schema` service applies `postgres/init.sql` on every start
+(it only adds what is missing), so a database kept from an older version gets the newer
+tables and the Grafana role before the Flink job writes to them. `make fast-replay` plays
+six hours of traffic sixty times faster on a fresh stack (it wipes the volumes), to see the
+ships move.
 
 ## Map and metrics
 

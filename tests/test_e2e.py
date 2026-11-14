@@ -279,6 +279,19 @@ def test_every_promql_query_is_valid(played: datetime, name: str, expr: str) -> 
     prom(expr)
 
 
+def test_schema_applies_again_on_an_existing_database(played: datetime) -> None:
+    """A PostgreSQL volume from an older version keeps its data but misses newer tables and
+    the Grafana role; the db-schema service, run on every start, must add them without
+    failing on what already exists."""
+    subprocess.run(
+        ["docker", "compose", "run", "--rm", "--no-deps", "db-schema"],
+        cwd=REPOSITORY,
+        check=True,
+        capture_output=True,
+    )
+    assert query("select count(*) from ship_positions") == [(9,)]
+
+
 def test_grafana_role_cannot_write(played: datetime) -> None:
     with pytest.raises(psycopg.errors.InsufficientPrivilege), psycopg.connect(READER) as conn:
         conn.execute("delete from port_events")
@@ -307,6 +320,16 @@ def test_reprocessing_from_scratch_gives_the_same_results(played: datetime) -> N
             urllib.request.Request(f"{FLINK}/jobs/{jid}?mode=cancel", method="PATCH"), timeout=5
         )
     wait_until(lambda: not flink_job_running(), 60, "the job to stop")
+    # The lag is measured by the broker: it stays visible while the job is down.
+    stopped = time.time()
+    wait_until(
+        lambda: any(
+            float(series["value"][0]) > stopped + 15
+            for series in prom('kafka_consumergroup_lag{consumergroup="flink-ais"}')
+        ),
+        60,
+        "a lag sample taken while the job is stopped",
+    )
     submit_job()
     time.sleep(45)  # the new job re-reads the topic and rewrites the closed windows
 

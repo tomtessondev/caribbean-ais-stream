@@ -1,7 +1,9 @@
 -- Results written by the Flink jobs (flink/sql/ais_jobs.sql). Each table has the primary
 -- key the job upserts on, so a restarted job rewrites a window instead of duplicating it.
+-- The db-schema Compose service applies this file on every start, so it only adds what is
+-- missing: a database created by an older version gets the newer tables and the role.
 
-create table port_activity (
+create table if not exists port_activity (
     port         text        not null,
     window_start timestamptz not null,
     window_end   timestamptz not null,
@@ -11,7 +13,7 @@ create table port_activity (
     primary key (port, window_start)
 );
 
-create table ship_hourly (
+create table if not exists ship_hourly (
     mmsi         bigint      not null,
     window_start timestamptz not null,
     window_end   timestamptz not null,
@@ -26,7 +28,7 @@ create table ship_hourly (
 
 -- A ship's reporting session: positions no more than 15 minutes apart. A row is written 15
 -- minutes after the last position, which is the "went dark" alert.
-create table ship_sessions (
+create table if not exists ship_sessions (
     mmsi          bigint      not null,
     session_start timestamptz not null,
     last_seen     timestamptz not null,  -- last position before the silence
@@ -38,7 +40,7 @@ create table ship_sessions (
 
 -- Two consecutive positions of a ship more than 15 minutes apart, written when the ship
 -- reports again.
-create table ais_gaps (
+create table if not exists ais_gaps (
     mmsi           bigint      not null,
     silent_from    timestamptz not null,
     silent_until   timestamptz not null,
@@ -52,7 +54,7 @@ create table ais_gaps (
 );
 
 -- Every silence: when it started and where, and when it ended (null while still dark).
-create view dark_periods as
+create or replace view dark_periods as
 select
     s.mmsi,
     s.ship_name,
@@ -66,7 +68,7 @@ left join ais_gaps g on g.mmsi = s.mmsi and g.silent_from = s.last_seen;
 
 -- Two consecutive positions of a ship too far apart for the time between them (> 1 nm at
 -- an implied speed > 60 knots): a spoofed or corrupted position.
-create table position_jumps (
+create table if not exists position_jumps (
     mmsi             bigint      not null,
     from_time        timestamptz not null,
     to_time          timestamptz not null,
@@ -81,7 +83,7 @@ create table position_jumps (
 );
 
 -- A ship entering a port area (arrival) or leaving it (departure).
-create table port_events (
+create table if not exists port_events (
     mmsi       bigint      not null,
     event_time timestamptz not null,
     port       text        not null,
@@ -92,7 +94,7 @@ create table port_events (
 );
 
 -- The latest position of each ship, for the map.
-create table ship_positions (
+create table if not exists ship_positions (
     mmsi        bigint      primary key,
     ts          timestamptz not null,
     lat         double precision,
@@ -106,7 +108,9 @@ create table ship_positions (
 );
 
 -- Grafana reads the results with its own role, which can only select. Its password comes
--- from the environment of the postgres container (GRAFANA_DB_PASSWORD).
+-- from the environment (GRAFANA_DB_PASSWORD).
 \getenv grafana_password GRAFANA_DB_PASSWORD
-create role grafana_reader login password :'grafana_password';
+select format('create role grafana_reader login password %L', :'grafana_password')
+where not exists (select from pg_roles where rolname = 'grafana_reader')
+\gexec
 grant select on all tables in schema public to grafana_reader;

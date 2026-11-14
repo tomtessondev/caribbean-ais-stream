@@ -26,6 +26,7 @@ count. Every change should be something a recruiter can read.
   (latest position per ship, for the map). Event time +
   watermarks: old events are late and dropped, so e2e tests need a fresh stack
   (`make e2e-up`, which does not submit the job: the tests submit it after their traffic).
+  The `db-schema` service applies `postgres/init.sql` (idempotent) on every start.
 - pytest (unit; `e2e` marked tests on the Compose stack; integration marked `integration` with a real `apache/kafka` broker started
   by the `kafka` fixture), ruff, mypy --strict
 - Grafana 12.3 on localhost:3002 (`grafana/`: provisioning + dashboard JSON, the source of

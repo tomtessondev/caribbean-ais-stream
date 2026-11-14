@@ -86,18 +86,30 @@ services:
       POSTGRES_USER: ais
       POSTGRES_PASSWORD: ais
       POSTGRES_DB: ais
-      # Password of the read-only role Grafana uses (postgres/init.sql).
-      GRAFANA_DB_PASSWORD: ${GRAFANA_DB_PASSWORD:-grafana-local}
     ports:
       - "5434:5432"
     volumes:
-      - ./postgres/init.sql:/docker-entrypoint-initdb.d/init.sql:ro
       - postgres-data:/var/lib/postgresql/data
     healthcheck:
       test: ["CMD-SHELL", "pg_isready -U ais -d ais"]
       interval: 2s
       retries: 30
     restart: unless-stopped
+
+  # Applies postgres/init.sql on every start, not only on an empty volume: a database from
+  # an older version gets the newer tables before the Flink job writes to them.
+  db-schema:
+    image: postgres:17.6
+    command: ["psql", "-v", "ON_ERROR_STOP=1", "-h", "postgres", "-U", "ais", "-d", "ais", "-f", "/init.sql"]
+    environment:
+      PGPASSWORD: ais
+      # Password of the read-only role Grafana uses.
+      GRAFANA_DB_PASSWORD: ${GRAFANA_DB_PASSWORD:-grafana-local}
+    volumes:
+      - ./postgres/init.sql:/init.sql:ro
+    depends_on:
+      postgres:
+        condition: service_healthy
 
   # The broker's view for Prometheus: offsets per partition (throughput) and the lag of
   # every consumer group, which stays measurable while a consumer is down.
@@ -138,8 +150,8 @@ services:
       - ./grafana/provisioning:/etc/grafana/provisioning:ro
       - ./grafana/dashboards:/var/lib/grafana/dashboards:ro
     depends_on:
-      postgres:
-        condition: service_healthy
+      db-schema:
+        condition: service_completed_successfully
     restart: unless-stopped
 
   flink-jobmanager:
@@ -182,8 +194,8 @@ services:
     depends_on:
       flink-taskmanager:
         condition: service_started
-      postgres:
-        condition: service_healthy
+      db-schema:
+        condition: service_completed_successfully
       topics:
         condition: service_completed_successfully
 
