@@ -99,13 +99,18 @@ def played() -> datetime:
     # positions would arrive late and be dropped.
     if not flink_job_running():
         submit_job()
-    # The last hour stays open (the watermark never passes its end): three closed hours per ship.
+    # The last hour stays open (the watermark never passes its end): three closed hours per
+    # ship. The anomalies of the fourth hour are written a moment later: wait for those too.
+    expected = {
+        f"select count(*) from ship_hourly where window_start >= '{start}'": 27,
+        f"select count(*) from port_events where event_time >= '{start}'": 12,
+        f"select count(*) from position_jumps where to_time >= '{start}'": 2,
+        f"select count(*) from ais_gaps where silent_from >= '{start}'": 1,
+    }
     wait_until(
-        lambda: (
-            query(f"select count(*) from ship_hourly where window_start >= '{start}'") == [(27,)]
-        ),
+        lambda: all(query(sql) == [(count,)] for sql, count in expected.items()),
         180,
-        "27 hourly rows",
+        "every result table",
     )
     return start
 

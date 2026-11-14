@@ -11,6 +11,7 @@ impossible jump, out and back). Same seed, same traffic.
 
 from __future__ import annotations
 
+import heapq
 import math
 import random
 from collections.abc import Iterator
@@ -206,8 +207,9 @@ def _fishing(
         ts += UNDER_WAY_STEP
 
 
-def traffic(start: datetime, hours: float, seed: int = 7) -> list[dict[str, Any]]:
-    """All messages of all ships over `hours`, in time order."""
+def stream(start: datetime, hours: float, seed: int = 7) -> Iterator[dict[str, Any]]:
+    """All messages of all ships over `hours`, in time order, generated as they are read:
+    each ship's messages are already in time order, so merging them needs no full list."""
     rng = random.Random(seed)
     end = start + timedelta(hours=hours)
     ferry = Ship(227000101, "ANTILLES EXPRESS", 60, "FAX101", 45, 12, 2.1)
@@ -276,6 +278,9 @@ def traffic(start: datetime, hours: float, seed: int = 7) -> list[dict[str, Any]
             spoofed=timedelta(hours=1, minutes=30),
         ),
     ]
-    messages = [m for stream in streams for m in stream]
-    messages.sort(key=lambda m: m["MetaData"]["time_utc"])
-    return messages
+    return heapq.merge(*streams, key=lambda m: m["MetaData"]["time_utc"])
+
+
+def traffic(start: datetime, hours: float, seed: int = 7) -> list[dict[str, Any]]:
+    """All messages of all ships over `hours`, in time order."""
+    return list(stream(start, hours, seed))

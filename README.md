@@ -65,8 +65,10 @@ docker compose exec postgres psql -U ais -c "select * from port_events order by 
 
 The synthetic traffic exercises each one: BLUE MERIDIAN goes silent for 45 minutes,
 OCEAN PEARL reports one position 30 nm off its track. Known limitation: on the live feed,
-a ship that leaves the covered area also stops reporting and shows as dark. Loitering is
-left for later.
+a ship that leaves the covered area also stops reporting and shows as dark. The demo
+generates its traffic as it plays, a year of it in one run: restarting it sends every ship
+back to the start of its route, which the detections would rightly flag as jumps.
+Loitering is left for later.
 
 With the real feed (free key from [aisstream.io](https://aisstream.io)):
 

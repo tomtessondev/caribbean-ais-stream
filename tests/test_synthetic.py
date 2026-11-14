@@ -6,7 +6,7 @@ from collections import defaultdict
 from datetime import UTC, datetime, timedelta
 
 from ais_stream.messages import Position, ShipStatic, parse_aisstream_time, to_record
-from ais_stream.synthetic import PORTS, traffic
+from ais_stream.synthetic import PORTS, stream, traffic
 
 START = datetime(2026, 11, 14, 6, tzinfo=UTC)
 # sha256 of the eight original ships' first hour, recorded before the ninth ship existed.
@@ -77,3 +77,11 @@ def test_the_other_ships_keep_their_traffic() -> None:
     """Adding a ship must not reshuffle the others' random streams."""
     others = [m for m in traffic(START, hours=1) if m["MetaData"]["MMSI"] != 255000707]
     assert hashlib.sha256(json.dumps(others).encode()).hexdigest() == EIGHT_SHIPS_ONE_HOUR
+
+
+def test_stream_yields_the_same_traffic_lazily() -> None:
+    """The demo plays a year without restarting: a restart would teleport every ship back
+    to the start of its route, which the anomaly detection would rightly flag."""
+    assert list(stream(START, hours=1)) == traffic(START, hours=1)
+    year = stream(START, hours=24 * 365)
+    assert next(year)["MetaData"]["time_utc"].startswith("2026-11-14 06:00:00")

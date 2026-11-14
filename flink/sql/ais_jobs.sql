@@ -225,7 +225,8 @@ MATCH_RECOGNIZE (
     ONE ROW PER MATCH
     AFTER MATCH SKIP TO LAST B
     PATTERN (A B)
-    DEFINE B AS TIMESTAMPDIFF(SECOND, A.event_time, B.event_time) > 15 * 60
+    -- Same rule as the session window, to the millisecond: every closed session gets its gap.
+    DEFINE B AS B.event_time > A.event_time + INTERVAL '15' MINUTE
 );
 
 -- Physically impossible jumps (spoofed or corrupted positions): two consecutive positions
