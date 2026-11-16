@@ -1,0 +1,17 @@
+{
+  "type": "record",
+  "name": "Position",
+  "namespace": "antilles.ais",
+  "doc": "Topic ais.positions, keyed by MMSI: one position report of a ship. AIS 'not available' sentinels are already nulls.",
+  "fields": [
+    {"name": "mmsi", "type": "long", "doc": "9-digit Maritime Mobile Service Identity"},
+    {"name": "ts", "type": {"type": "long", "logicalType": "timestamp-micros"}, "doc": "When the ship sent the report (UTC), the event time"},
+    {"name": "lat", "type": "double", "doc": "Latitude, degrees"},
+    {"name": "lon", "type": "double", "doc": "Longitude, degrees"},
+    {"name": "sog_kn", "type": ["null", "double"], "default": null, "doc": "Speed over ground, knots"},
+    {"name": "cog_deg", "type": ["null", "double"], "default": null, "doc": "Course over ground, degrees"},
+    {"name": "heading_deg", "type": ["null", "int"], "default": null, "doc": "True heading, degrees (null without a gyro compass)"},
+    {"name": "nav_status", "type": ["null", "int"], "default": null, "doc": "Navigational status: 0 under way, 1 at anchor, 5 moored, 7 fishing"},
+    {"name": "ship_name", "type": ["null", "string"], "default": null, "doc": "Name as relayed with the report"}
+  ]
+}
