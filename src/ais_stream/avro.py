@@ -13,7 +13,7 @@ from __future__ import annotations
 from pathlib import Path
 from typing import Any
 
-from confluent_kafka.schema_registry import SchemaRegistryClient
+from confluent_kafka.schema_registry import Schema, SchemaRegistryClient
 from confluent_kafka.schema_registry.avro import AvroDeserializer, AvroSerializer
 from confluent_kafka.serialization import SerializationContext
 from pydantic import BaseModel
@@ -28,6 +28,18 @@ SUBJECTS: dict[str, str] = {
     f"{topic}-value": (SCHEMA_DIR / name).read_text(encoding="utf-8").strip()
     for topic, name in _FILES.items()
 }
+
+
+def register_schemas(registry_url: str) -> dict[str, int]:
+    """Sets the compatibility of each subject and registers the repository's schemas.
+    Returns subject -> schema id. Registering an unchanged schema again returns the same id;
+    a schema the registry finds incompatible raises its error, before anything is produced."""
+    client = SchemaRegistryClient({"url": registry_url})
+    ids = {}
+    for subject, schema in SUBJECTS.items():
+        client.set_compatibility(subject_name=subject, level=COMPATIBILITY)
+        ids[subject] = int(client.register_schema(subject, Schema(schema, "AVRO")))
+    return ids
 
 
 def _to_dict(record: BaseModel, _ctx: SerializationContext) -> dict[str, Any]:

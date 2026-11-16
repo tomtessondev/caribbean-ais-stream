@@ -9,7 +9,11 @@ from typing import Any
 from confluent_kafka import KafkaError, Message, Producer
 from confluent_kafka.admin import AdminClient
 from confluent_kafka.cimpl import NewTopic
+from confluent_kafka.schema_registry import SchemaRegistryClient
+from confluent_kafka.schema_registry.avro import AvroSerializer
+from confluent_kafka.serialization import MessageField, SerializationContext
 
+from ais_stream.avro import value_serializer
 from ais_stream.messages import Position, Record, Rejected, ShipStatic
 
 logger = logging.getLogger(__name__)
@@ -58,11 +62,17 @@ class AisProducer:
     """
 
     bootstrap: str
+    registry_url: str
     delivered: int = 0
     failed: int = 0
     _producer: Any = field(init=False)
+    _serializers: dict[str, AvroSerializer] = field(init=False)
 
     def __post_init__(self) -> None:
+        # Positions and ships in Avro, with the schemas registered by `topics`; rejects stay
+        # JSON, readable without the registry.
+        client = SchemaRegistryClient({"url": self.registry_url})
+        self._serializers = {topic: value_serializer(client, topic) for topic in (POSITIONS, SHIPS)}
         self._producer = Producer(
             {
                 "bootstrap.servers": self.bootstrap,
@@ -80,7 +90,7 @@ class AisProducer:
             self.failed += 1
             logger.error("Delivery failed: %s", error)
 
-    def _send(self, topic: str, key: str, value: str) -> None:
+    def _send(self, topic: str, key: str, value: str | bytes | None) -> None:
         while True:
             try:
                 self._producer.produce(topic, key=key, value=value, on_delivery=self._on_delivery)
@@ -90,7 +100,9 @@ class AisProducer:
         self._producer.poll(0)
 
     def send(self, record: Position | ShipStatic) -> None:
-        self._send(topic_for(record), str(record.mmsi), record.model_dump_json())
+        topic = topic_for(record)
+        value = self._serializers[topic](record, SerializationContext(topic, MessageField.VALUE))
+        self._send(topic, str(record.mmsi), value)
 
     def reject(self, rejected: Rejected) -> None:
         self._send(DLQ, "", rejected.model_dump_json())

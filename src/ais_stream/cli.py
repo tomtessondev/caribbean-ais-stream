@@ -12,6 +12,7 @@ from pathlib import Path
 
 import typer
 
+from ais_stream.avro import register_schemas
 from ais_stream.kafka import AisProducer, create_topics
 from ais_stream.messages import parse_aisstream_time
 from ais_stream.pipeline import handle
@@ -24,6 +25,11 @@ app = typer.Typer(help="Lesser Antilles ship traffic, from AIS to Kafka", no_arg
 Bootstrap = typer.Option(
     os.getenv("KAFKA_BOOTSTRAP", "localhost:9092"), "--bootstrap", help="Kafka bootstrap servers"
 )
+Registry = typer.Option(
+    os.getenv("SCHEMA_REGISTRY_URL", "http://localhost:8081"),
+    "--registry",
+    help="Confluent Schema Registry URL",
+)
 
 
 @app.callback()
@@ -35,8 +41,16 @@ def main(verbose: bool = typer.Option(False, "--verbose", "-v", help="Debug logg
 
 
 @app.command()
-def topics(bootstrap: str = Bootstrap) -> None:
-    """Create the Kafka topics (positions, ships, dead letters) if they are missing."""
+def topics(bootstrap: str = Bootstrap, registry: str = Registry) -> None:
+    """Register the Avro schemas (FULL_TRANSITIVE) and create the Kafka topics (positions,
+    ships, dead letters) if they are missing. Run on every start: a schema the registry
+    refuses, or a registry out of reach, stops it before anything is produced."""
+    try:
+        ids = register_schemas(registry)
+    except Exception as exc:  # whatever the client raises: unreachable, refused, invalid
+        typer.echo(f"Schema registry at {registry}: {exc}", err=True)
+        raise typer.Exit(1) from exc
+    typer.echo(f"Schemas {', '.join(f'{s} (id {i})' for s, i in ids.items())}")
     created = create_topics(bootstrap)
     typer.echo(f"Created {', '.join(created) or 'nothing (all topics exist)'}")
 
@@ -44,12 +58,13 @@ def topics(bootstrap: str = Bootstrap) -> None:
 @app.command()
 def live(
     bootstrap: str = Bootstrap,
+    registry: str = Registry,
     api_key: str = typer.Option(..., envvar="AISSTREAM_API_KEY", help="aisstream.io API key"),
 ) -> None:
     """Stream the Lesser Antilles from aisstream.io into Kafka until stopped."""
     if not api_key.strip():
         raise typer.BadParameter("get a free key at https://aisstream.io", param_hint="api_key")
-    producer = AisProducer(bootstrap)
+    producer = AisProducer(bootstrap, registry)
 
     async def run() -> None:
         async for raw in live_source(api_key):
@@ -70,10 +85,11 @@ def replay(
         ..., exists=True, help="JSON lines, one aisstream message each"
     ),
     bootstrap: str = Bootstrap,
+    registry: str = Registry,
     speed: float = typer.Option(0, min=0, help="1 = real pace, 10 = ten times faster, 0 = at once"),
 ) -> None:
     """Send a recording through the same parsing as the live feed."""
-    producer = AisProducer(bootstrap)
+    producer = AisProducer(bootstrap, registry)
     records = sum(handle(raw, producer) for raw in replay_source(recording, speed))
     pending = producer.flush()
     typer.echo(
@@ -103,6 +119,7 @@ def synthesize(
 @app.command()
 def demo(
     bootstrap: str = Bootstrap,
+    registry: str = Registry,
     hours: float = typer.Option(
         24 * 365, min=0.1, help="Hours of traffic to play (a restart sends every ship back to port)"
     ),
@@ -110,7 +127,7 @@ def demo(
 ) -> None:
     """Play synthetic traffic into Kafka at the real pace, timestamped from now on, as if
     the ships were out there: the stand-in for `live` without an aisstream.io key."""
-    producer = AisProducer(bootstrap)
+    producer = AisProducer(bootstrap, registry)
     start = datetime.now(UTC).replace(microsecond=0)
     sent = 0
     try:

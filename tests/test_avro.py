@@ -10,8 +10,10 @@ import pytest
 from confluent_kafka.schema_registry import Schema, SchemaRegistryClient
 from confluent_kafka.serialization import MessageField, SerializationContext
 from pydantic import BaseModel
+from typer.testing import CliRunner
 
 from ais_stream.avro import SUBJECTS, value_deserializer, value_serializer
+from ais_stream.cli import app
 from ais_stream.kafka import POSITIONS, SHIPS
 from ais_stream.messages import Position, ShipStatic, to_record
 from ais_stream.synthetic import traffic
@@ -46,3 +48,11 @@ def test_records_round_trip_through_avro() -> None:
         data = value_serializer(client, topic)(record, ctx)
         assert data is not None and data[0] == 0  # Confluent wire format: magic byte, schema id
         assert type(record)(**value_deserializer(client, topic)(data, ctx)) == record
+
+
+def test_topics_fails_clearly_without_a_registry() -> None:
+    result = CliRunner().invoke(
+        app, ["topics", "--bootstrap", "localhost:1", "--registry", "http://localhost:1"]
+    )
+    assert result.exit_code == 1
+    assert "schema registry at http://localhost:1" in result.output.lower()
