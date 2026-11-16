@@ -1,13 +1,15 @@
 # Kafka and the AIS producers on a laptop.
 #   docker compose up -d                         synthetic traffic, no account needed
 #   docker compose --profile live up -d live     the real feed (AISSTREAM_API_KEY in .env)
-# Kafka UI on http://localhost:8088, Kafka on localhost:9094 from the host.
+# Kafka UI on http://localhost:8088, Kafka on localhost:9094 from the host, Schema Registry
+# on http://localhost:8081.
 
 x-app: &app
   build: .
   image: caribbean-ais-stream
   environment:
     KAFKA_BOOTSTRAP: kafka:9092
+    SCHEMA_REGISTRY_URL: http://schema-registry:8081
 
 services:
   kafka:
@@ -40,11 +42,34 @@ services:
       retries: 30
     restart: unless-stopped
 
+  # The contract of the records: Avro schemas (src/ais_stream/schemas/), stored in the
+  # broker's _schemas topic, on http://localhost:8081.
+  schema-registry:
+    image: confluentinc/cp-schema-registry:7.9.0
+    environment:
+      SCHEMA_REGISTRY_HOST_NAME: schema-registry
+      SCHEMA_REGISTRY_LISTENERS: http://0.0.0.0:8081
+      SCHEMA_REGISTRY_KAFKASTORE_BOOTSTRAP_SERVERS: PLAINTEXT://kafka:9092
+    ports:
+      - "8081:8081"
+    depends_on:
+      kafka:
+        condition: service_healthy
+    healthcheck:
+      test: ["CMD-SHELL", "curl -sf http://localhost:8081/subjects"]
+      interval: 5s
+      retries: 30
+    restart: unless-stopped
+
+  # Registers the schemas (refusing an incompatible change) and creates the topics, on
+  # every start, before anything is produced.
   topics:
     <<: *app
     command: ["topics"]
     depends_on:
       kafka:
+        condition: service_healthy
+      schema-registry:
         condition: service_healthy
 
   demo:
@@ -61,6 +86,7 @@ services:
     command: ["live"]
     environment:
       KAFKA_BOOTSTRAP: kafka:9092
+      SCHEMA_REGISTRY_URL: http://schema-registry:8081
       # Required by `ais-stream live`, which refuses to start without it.
       AISSTREAM_API_KEY: ${AISSTREAM_API_KEY:-}
     depends_on:
@@ -73,6 +99,8 @@ services:
     environment:
       KAFKA_CLUSTERS_0_NAME: antilles
       KAFKA_CLUSTERS_0_BOOTSTRAPSERVERS: kafka:9092
+      # Decodes the Avro messages and lists the schemas.
+      KAFKA_CLUSTERS_0_SCHEMAREGISTRY: http://schema-registry:8081
     ports:
       - "8088:8080"
     depends_on:

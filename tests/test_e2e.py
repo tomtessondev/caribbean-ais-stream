@@ -21,6 +21,7 @@ from typing import Any
 
 import psycopg
 import pytest
+from confluent_kafka.schema_registry import SchemaRegistryClient
 from grafana_queries import dashboard_queries, prometheus_queries, render
 from psycopg.rows import dict_row
 
@@ -35,6 +36,7 @@ KAFKA = os.getenv("E2E_KAFKA", "localhost:9094")
 FLINK = os.getenv("E2E_FLINK", "http://localhost:8082")
 POSTGRES = os.getenv("E2E_POSTGRES", "postgresql://ais:ais@localhost:5434/ais")
 PROMETHEUS = os.getenv("E2E_PROMETHEUS", "http://localhost:9090")
+REGISTRY = os.getenv("E2E_REGISTRY", "http://localhost:8081")
 # Grafana's read-only role (postgres/init.sql), with the local default password.
 READER = POSTGRES.replace("ais:ais@", "grafana_reader:grafana-local@")
 REPOSITORY = Path(__file__).resolve().parents[1]
@@ -83,7 +85,7 @@ def submit_job() -> None:
 
 
 def play(start: datetime, hours: float) -> int:
-    producer = AisProducer(KAFKA)
+    producer = AisProducer(KAFKA, REGISTRY)
     records = sum(handle(json.dumps(m), producer) for m in traffic(start, hours))
     assert producer.flush() == 0 and producer.failed == 0
     return records
@@ -290,6 +292,11 @@ def test_schema_applies_again_on_an_existing_database(played: datetime) -> None:
         capture_output=True,
     )
     assert query("select count(*) from ship_positions") == [(9,)]
+
+
+def test_the_registry_holds_both_schemas(played: datetime) -> None:
+    client = SchemaRegistryClient({"url": REGISTRY})
+    assert sorted(client.get_subjects()) == ["ais.positions-value", "ais.ships-value"]
 
 
 def test_grafana_role_cannot_write(played: datetime) -> None:
