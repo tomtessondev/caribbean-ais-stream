@@ -18,7 +18,12 @@ count. Every change should be something a recruiter can read.
   - `kafka.py`: topics (`ais.positions`, compacted `ais.ships`, `ais.dlq`), keyed
     idempotent producer; `pipeline.py`: one raw message → record or reject
   - `synthetic.py`: deterministic traffic in aisstream's exact format
-- Kafka 3.9 KRaft (`apache/kafka`), Kafka UI, Docker Compose
+  - `avro.py` + `schemas/*.avsc`: the Avro contract (source of truth, a test keeps it in
+    line with the pydantic models), registration with FULL_TRANSITIVE compatibility,
+    serializers. Positions and ships are Avro; `ais.dlq` stays JSON. The producer never
+    auto-registers: change a record by editing the `.avsc` and the model together.
+- Kafka 3.9 KRaft (`apache/kafka`), Kafka UI, Confluent Schema Registry (localhost:8081;
+  `topics` registers the schemas on every start), Docker Compose
 - Flink 1.20 SQL (`flink/sql/ais_jobs.sql`, image `flink/Dockerfile` with Kafka, JDBC,
   PostgreSQL and zstd jars) → PostgreSQL tables in `postgres/init.sql` (primary keys =
   upsert keys): `port_activity`, `ship_hourly`, and the anomalies `ship_sessions` +

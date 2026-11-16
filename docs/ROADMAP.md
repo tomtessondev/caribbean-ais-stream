@@ -16,5 +16,7 @@
    of each ship with its anomalies, port activity and events; Prometheus with a Kafka
    exporter and Flink's reporter for throughput, consumer lag and watermark delay;
    screenshots and a GIF from an accelerated replay.
-5. **Schemas.** Avro with a schema registry, so producers and Flink agree on the records
-   and evolve them safely.
+5. **Schemas** (done). Avro schemas in the repository (checked against the pydantic models),
+   registered in Confluent Schema Registry with FULL_TRANSITIVE compatibility by the
+   `topics` command; the producer writes Avro, Flink reads it with `avro-confluent`; tests
+   against a real registry show which changes are accepted and which are refused.
