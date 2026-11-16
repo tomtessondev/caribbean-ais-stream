@@ -1,0 +1,18 @@
+{
+  "type": "record",
+  "name": "ShipStatic",
+  "namespace": "antilles.ais",
+  "doc": "Topic ais.ships (compacted, keyed by MMSI): the latest description of a ship.",
+  "fields": [
+    {"name": "mmsi", "type": "long", "doc": "9-digit Maritime Mobile Service Identity"},
+    {"name": "ts", "type": {"type": "long", "logicalType": "timestamp-micros"}, "doc": "When the ship sent its description (UTC)"},
+    {"name": "name", "type": ["null", "string"], "default": null, "doc": "Ship name, without AIS '@' padding"},
+    {"name": "ship_type", "type": ["null", "int"], "default": null, "doc": "AIS ship type: 60-69 passenger, 70-79 cargo, 80-89 tanker"},
+    {"name": "call_sign", "type": ["null", "string"], "default": null, "doc": "Radio call sign"},
+    {"name": "imo", "type": ["null", "long"], "default": null, "doc": "IMO number, if any"},
+    {"name": "destination", "type": ["null", "string"], "default": null, "doc": "Destination as typed by the crew"},
+    {"name": "length_m", "type": ["null", "int"], "default": null, "doc": "Length, metres (bow + stern distances to the antenna)"},
+    {"name": "beam_m", "type": ["null", "int"], "default": null, "doc": "Beam, metres"},
+    {"name": "draught_m", "type": ["null", "double"], "default": null, "doc": "Maximum static draught, metres"}
+  ]
+}

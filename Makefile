@@ -37,8 +37,8 @@ logs:
 e2e-up:
 	docker compose down -v
 	docker compose up -d --build --wait kafka postgres flink-jobmanager flink-taskmanager \
-		kafka-exporter prometheus grafana
-	docker compose run --rm topics
+		schema-registry kafka-exporter prometheus grafana
+	docker compose run --rm --build topics
 
 e2e:
 	pytest -m e2e --no-cov

@@ -3,7 +3,8 @@
 Real-time ship traffic around the **Lesser Antilles**, from the AIS radio broadcasts of
 every large ship to **Kafka**, then **Flink**. Ships report their position every few
 seconds under way and their identity every six minutes; this project turns that stream into
-clean, keyed Kafka records, then Flink SQL turns those into port activity, per-ship
+clean, keyed Kafka records in Avro, under a schema registry that refuses any change that
+would break a reader, then Flink SQL turns those into port activity, per-ship
 statistics and anomalies (ships going dark, impossible position jumps, port arrivals and
 departures) on event time, upserted into PostgreSQL, shown on a live map in Grafana.
 
@@ -16,9 +17,11 @@ Third piece of a portfolio on the same islands, after
 ## Architecture
 
 ```
- aisstream.io (WebSocket) ─┐                              ┌─► ais.positions   (keyed by MMSI, 7 days)
- recording (JSON lines) ───┼─► normalise (pydantic) ──────┼─► ais.ships       (compacted: latest per ship)
- synthetic traffic ────────┘   AIS sentinels → null       └─► ais.dlq         (rejects, verbatim)
+ aisstream.io (WebSocket) ─┐                              ┌─► ais.positions   (Avro, keyed by MMSI, 7 days)
+ recording (JSON lines) ───┼─► normalise (pydantic) ──────┼─► ais.ships       (Avro, compacted: latest per ship)
+ synthetic traffic ────────┘   AIS sentinels → null       └─► ais.dlq         (JSON, rejects verbatim)
+                                        │                          │
+                    Schema Registry: position.avsc, ship_static.avsc, FULL_TRANSITIVE
                                                                    │
                                      Flink SQL: event time, watermark 30 s, idle partitions
                                        ├─ tumbling 5 min per port area ──► port_activity   (PostgreSQL,
@@ -37,7 +40,8 @@ Third piece of a portfolio on the same islands, after
 | --- | --- | --- |
 | Records | AIS normalisation, pydantic models | `src/ais_stream/messages.py` |
 | Sources | aisstream.io client with reconnection, replay of recordings | `src/ais_stream/sources.py` |
-| Producer | confluent-kafka: keyed, idempotent, acks=all, zstd | `src/ais_stream/kafka.py`, `pipeline.py` |
+| Producer | confluent-kafka: keyed, idempotent, acks=all, zstd, Avro values | `src/ais_stream/kafka.py`, `pipeline.py` |
+| Schemas | Avro (`.avsc`, the source of truth), Confluent Schema Registry, FULL_TRANSITIVE compatibility | `src/ais_stream/schemas/`, `avro.py` |
 | Synthetic traffic | Ferries, cargo, cruise, tanker at anchor, fishing boats, a ship going dark, a spoofed position | `src/ais_stream/synthetic.py` |
 | Stream processing | Flink 1.20 SQL: Kafka source, window TVFs (tumbling, session), `MATCH_RECOGNIZE`, JDBC/PostgreSQL upsert sinks | `flink/sql/ais_jobs.sql`, `flink/Dockerfile`, `postgres/init.sql` |
 | Dashboards | Grafana 12 provisioned as code: geomap of the ships, anomalies, port activity, stream health | `grafana/` |
@@ -49,7 +53,8 @@ Third piece of a portfolio on the same islands, after
 
 ```bash
 docker compose up -d --build     # Kafka, Flink, PostgreSQL, synthetic ships at the real pace
-open http://localhost:8088       # Kafka UI: topics, partitions, messages
+open http://localhost:8088       # Kafka UI: topics, partitions, messages (decoded), schemas
+open http://localhost:8081/subjects  # Schema Registry
 open http://localhost:8082       # Flink UI: the running job, watermarks, checkpoints
 open http://localhost:3002       # Grafana: map of the ships, stream health (no login)
 open http://localhost:9090       # Prometheus
@@ -61,7 +66,37 @@ minutes after start. The `db-schema` service applies `postgres/init.sql` on ever
 (it only adds what is missing), so a database kept from an older version gets the newer
 tables and the Grafana role before the Flink job writes to them. `make fast-replay` plays
 six hours of traffic sixty times faster on a fresh stack (it wipes the volumes), to see the
-ships move.
+ships move. A stack started before the switch to Avro still has JSON in its topics, which
+Flink cannot read alongside Avro: `docker compose down -v` once.
+
+## Schemas
+
+The records' contract is two Avro schemas in `src/ais_stream/schemas/`
+(`position.avsc`, `ship_static.avsc`), with a `doc` on every field. A test checks they
+describe exactly the fields of the pydantic models, so the two cannot drift. The `topics`
+command, run on every start, registers them in Confluent Schema Registry (subjects
+`ais.positions-value`, `ais.ships-value`) and sets their compatibility; the producer
+serialises with them and never registers anything itself. Flink reads `ais.positions` with
+the `avro-confluent` format; Kafka UI decodes the messages. Rejects stay JSON in `ais.dlq`:
+they are what could not be parsed, for a human to read, and should not depend on the
+registry.
+
+Compatibility is **FULL_TRANSITIVE**. The producer changes first while Flink reads with the
+schema fixed in its SQL, so a new schema must stay readable by every older reader; and
+Flink reprocesses the topic from the earliest offset, so every older record must stay
+readable by a newer reader. In practice, the only allowed change is adding or removing an
+optional field that has a default. The integration tests run against a real registry:
+adding the AIS rate of turn as an optional field is accepted; removing `lat` (readers
+have no default for it: Flink would read nulls, and port areas and the map would go wrong
+without any error), adding a required field (old records could not be reprocessed) and
+turning `mmsi` into a string are refused. So is a change compatible with the latest version
+but not with an older one (transitivity: a Flink job not yet redeployed still reads with
+the older schema). And when the `.avsc` in the repository is incompatible, `topics` stops
+the start with the registry's reason.
+
+To evolve a record: change the `.avsc` and the pydantic model together, run `make check`
+(the drift test), then `make integration`; on the next start, `topics` registers the new
+version, or stops the stack with the registry's reason before anything is produced.
 
 ## Map and metrics
 

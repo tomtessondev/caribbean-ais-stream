@@ -13,7 +13,10 @@ SET 'table.exec.source.idle-timeout' = '30 s';
 
 CREATE TABLE positions (
     mmsi        BIGINT,
-    ts          TIMESTAMP_LTZ(6),
+    -- An Avro timestamp-micros is a long counting microseconds since the epoch (UTC). Flink
+    -- 1.20's Avro format only maps millisecond timestamps, so the column is read as the raw
+    -- long and turned into an instant below; Kafka keeps the full precision.
+    ts          BIGINT,
     lat         DOUBLE,
     lon         DOUBLE,
     sog_kn      DOUBLE,
@@ -22,7 +25,7 @@ CREATE TABLE positions (
     nav_status  INT,
     ship_name   STRING,
     -- Event time is when the ship sent the position, not when Kafka received it.
-    event_time AS CAST(ts AS TIMESTAMP_LTZ(3)),
+    event_time AS TO_TIMESTAMP_LTZ(ts / 1000, 3),
     -- Positions may arrive up to 30 s out of order (radio, relays, reconnections).
     WATERMARK FOR event_time AS event_time - INTERVAL '30' SECOND
 ) WITH (
@@ -31,8 +34,10 @@ CREATE TABLE positions (
     'properties.bootstrap.servers' = 'kafka:9092',
     'properties.group.id' = 'flink-ais',
     'scan.startup.mode' = 'earliest-offset',
-    'format' = 'json',
-    'json.timestamp-format.standard' = 'ISO-8601'
+    -- Avro in the Confluent wire format: each message names its writer schema, fetched from
+    -- the registry; FULL_TRANSITIVE compatibility guarantees this table can read it.
+    'format' = 'avro-confluent',
+    'avro-confluent.url' = 'http://schema-registry:8081'
 );
 
 -- Port areas as boxes around each harbour. A CASE expression rather than a join with a

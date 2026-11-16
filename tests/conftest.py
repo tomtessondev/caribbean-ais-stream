@@ -1,13 +1,16 @@
 from __future__ import annotations
 
 import socket
+import urllib.request
 from collections.abc import Iterator
 
 import pytest
 from testcontainers.core.container import DockerContainer
+from testcontainers.core.network import Network
 from testcontainers.core.waiting_utils import wait_for_logs
 
 KAFKA_IMAGE = "apache/kafka:3.9.1"
+REGISTRY_IMAGE = "confluentinc/cp-schema-registry:7.9.0"
 
 
 def _free_port() -> int:
@@ -18,21 +21,33 @@ def _free_port() -> int:
 
 
 @pytest.fixture(scope="session")
-def kafka() -> Iterator[str]:
+def network() -> Iterator[Network]:
+    with Network() as net:
+        yield net
+
+
+@pytest.fixture(scope="session")
+def kafka(network: Network) -> Iterator[str]:
     """A single-node KRaft broker, the same image as docker-compose.yml. Kafka tells clients
     which address to reconnect to (advertised listener), so the host port is chosen before
-    start and advertised as is."""
+    start and advertised as is. A second listener serves the containers of the test network
+    (the schema registry) as kafka:19092."""
     port = _free_port()
     container = (
         DockerContainer(KAFKA_IMAGE)
+        .with_network(network)
+        .with_network_aliases("kafka")
         .with_bind_ports(9092, port)
         .with_env("KAFKA_NODE_ID", "1")
         .with_env("KAFKA_PROCESS_ROLES", "broker,controller")
-        .with_env("KAFKA_LISTENERS", "PLAINTEXT://:9092,CONTROLLER://:9093")
-        .with_env("KAFKA_ADVERTISED_LISTENERS", f"PLAINTEXT://localhost:{port}")
+        .with_env("KAFKA_LISTENERS", "PLAINTEXT://:9092,DOCKER://:19092,CONTROLLER://:9093")
+        .with_env(
+            "KAFKA_ADVERTISED_LISTENERS", f"PLAINTEXT://localhost:{port},DOCKER://kafka:19092"
+        )
         .with_env("KAFKA_CONTROLLER_LISTENER_NAMES", "CONTROLLER")
         .with_env(
-            "KAFKA_LISTENER_SECURITY_PROTOCOL_MAP", "CONTROLLER:PLAINTEXT,PLAINTEXT:PLAINTEXT"
+            "KAFKA_LISTENER_SECURITY_PROTOCOL_MAP",
+            "CONTROLLER:PLAINTEXT,PLAINTEXT:PLAINTEXT,DOCKER:PLAINTEXT",
         )
         .with_env("KAFKA_CONTROLLER_QUORUM_VOTERS", "1@localhost:9093")
         .with_env("KAFKA_OFFSETS_TOPIC_REPLICATION_FACTOR", "1")
@@ -43,3 +58,22 @@ def kafka() -> Iterator[str]:
     with container:
         wait_for_logs(container, "Kafka Server started", timeout=60)
         yield f"localhost:{port}"
+
+
+@pytest.fixture(scope="session")
+def schema_registry(network: Network, kafka: str) -> Iterator[str]:
+    """Confluent Schema Registry on the test network, storing its schemas in the broker."""
+    container = (
+        DockerContainer(REGISTRY_IMAGE)
+        .with_network(network)
+        .with_exposed_ports(8081)
+        .with_env("SCHEMA_REGISTRY_HOST_NAME", "schema-registry")
+        .with_env("SCHEMA_REGISTRY_LISTENERS", "http://0.0.0.0:8081")
+        .with_env("SCHEMA_REGISTRY_KAFKASTORE_BOOTSTRAP_SERVERS", "PLAINTEXT://kafka:19092")
+    )
+    with container:
+        wait_for_logs(container, "Server started, listening for requests", timeout=90)
+        url = f"http://localhost:{container.get_exposed_port(8081)}"
+        with urllib.request.urlopen(f"{url}/subjects", timeout=10) as response:
+            assert response.status == 200
+        yield url

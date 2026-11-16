@@ -1,16 +1,20 @@
-"""The producer against a real Kafka broker."""
+"""The producer against a real Kafka broker and a real schema registry."""
 
 from __future__ import annotations
 
 import json
 from collections import defaultdict
+from collections.abc import Callable
 from datetime import UTC, datetime
 from typing import Any
 
 import pytest
 from confluent_kafka import Consumer
 from confluent_kafka.admin import AdminClient, ConfigResource
+from confluent_kafka.schema_registry import SchemaRegistryClient
+from confluent_kafka.serialization import MessageField, SerializationContext
 
+from ais_stream.avro import register_schemas, value_deserializer
 from ais_stream.kafka import DLQ, POSITIONS, SHIPS, AisProducer, create_topics
 from ais_stream.pipeline import handle
 from ais_stream.synthetic import traffic
@@ -18,7 +22,9 @@ from ais_stream.synthetic import traffic
 pytestmark = pytest.mark.integration
 
 
-def consume_all(bootstrap: str, topic: str, expected: int) -> list[tuple[str, dict[str, Any]]]:
+def consume_all(
+    bootstrap: str, topic: str, expected: int, decode: Callable[[bytes], dict[str, Any]]
+) -> list[tuple[str, dict[str, Any]]]:
     consumer = Consumer(
         {
             "bootstrap.servers": bootstrap,
@@ -37,9 +43,15 @@ def consume_all(bootstrap: str, topic: str, expected: int) -> list[tuple[str, di
             continue
         idle = 0
         key = message.key().decode() if message.key() else ""
-        out.append((key, json.loads(message.value())))
+        out.append((key, decode(message.value())))
     consumer.close()
     return out
+
+
+def avro(registry: str, topic: str) -> Callable[[bytes], dict[str, Any]]:
+    deserializer = value_deserializer(SchemaRegistryClient({"url": registry}), topic)
+    ctx = SerializationContext(topic, MessageField.VALUE)
+    return lambda data: deserializer(data, ctx)
 
 
 def test_topics_are_created_once_with_their_retention_policy(kafka: str) -> None:
@@ -53,10 +65,11 @@ def test_topics_are_created_once_with_their_retention_policy(kafka: str) -> None
     assert config["cleanup.policy"].value == "compact"
 
 
-def test_synthetic_hour_lands_in_kafka_in_per_ship_order(kafka: str) -> None:
+def test_synthetic_hour_lands_in_kafka_in_per_ship_order(kafka: str, schema_registry: str) -> None:
     create_topics(kafka)
+    register_schemas(schema_registry)
     messages = traffic(datetime(2026, 11, 14, 6, tzinfo=UTC), hours=1)
-    producer = AisProducer(kafka)
+    producer = AisProducer(kafka, schema_registry)
 
     records = sum(handle(json.dumps(m), producer) for m in messages)
     handle("garbage", producer)
@@ -65,15 +78,16 @@ def test_synthetic_hour_lands_in_kafka_in_per_ship_order(kafka: str) -> None:
     assert producer.flush() == 0
     assert producer.failed == 0
     assert producer.delivered == records + 1
-    positions = consume_all(kafka, POSITIONS, expected_positions)
-    ships = consume_all(kafka, SHIPS, records - expected_positions)
+    positions = consume_all(kafka, POSITIONS, expected_positions, avro(schema_registry, POSITIONS))
+    ships = consume_all(kafka, SHIPS, records - expected_positions, avro(schema_registry, SHIPS))
     assert len(positions) == expected_positions
     assert len(positions) + len(ships) == records
-    assert [v["raw"] for _, v in consume_all(kafka, DLQ, 1)] == ["garbage"]
+    # Rejects stay JSON: readable without the registry.
+    assert [v["raw"] for _, v in consume_all(kafka, DLQ, 1, json.loads)] == ["garbage"]
 
     # Keyed by MMSI: each ship's positions sit in one partition, so a consumer reads them
     # in the order they were sent.
-    by_ship: dict[str, list[str]] = defaultdict(list)
+    by_ship: dict[str, list[datetime]] = defaultdict(list)
     for key, value in positions:
         assert key == str(value["mmsi"])
         by_ship[key].append(value["ts"])
