@@ -9,11 +9,10 @@ from typing import Any
 from confluent_kafka import KafkaError, Message, Producer
 from confluent_kafka.admin import AdminClient
 from confluent_kafka.cimpl import NewTopic
-from confluent_kafka.schema_registry import SchemaRegistryClient
 from confluent_kafka.schema_registry.avro import AvroSerializer
 from confluent_kafka.serialization import MessageField, SerializationContext
 
-from ais_stream.avro import value_serializer
+from ais_stream.avro import registry_client, value_serializer
 from ais_stream.messages import Position, Record, Rejected, ShipStatic
 
 logger = logging.getLogger(__name__)
@@ -71,7 +70,7 @@ class AisProducer:
     def __post_init__(self) -> None:
         # Positions and ships in Avro, with the schemas registered by `topics`; rejects stay
         # JSON, readable without the registry.
-        client = SchemaRegistryClient({"url": self.registry_url})
+        client = registry_client(self.registry_url)
         self._serializers = {topic: value_serializer(client, topic) for topic in (POSITIONS, SHIPS)}
         self._producer = Producer(
             {

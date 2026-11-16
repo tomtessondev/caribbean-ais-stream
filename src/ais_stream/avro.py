@@ -30,11 +30,17 @@ SUBJECTS: dict[str, str] = {
 }
 
 
+def registry_client(registry_url: str) -> SchemaRegistryClient:
+    """The client has no HTTP timeout by default: a registry that accepts the connection and
+    never answers would block the start (or the producer's first schema lookup) forever."""
+    return SchemaRegistryClient({"url": registry_url, "timeout": 10, "max.retries": 2})
+
+
 def register_schemas(registry_url: str) -> dict[str, int]:
     """Sets the compatibility of each subject and registers the repository's schemas.
     Returns subject -> schema id. Registering an unchanged schema again returns the same id;
     a schema the registry finds incompatible raises its error, before anything is produced."""
-    client = SchemaRegistryClient({"url": registry_url})
+    client = registry_client(registry_url)
     ids = {}
     for subject, schema in SUBJECTS.items():
         client.set_compatibility(subject_name=subject, level=COMPATIBILITY)

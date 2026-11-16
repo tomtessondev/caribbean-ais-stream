@@ -86,9 +86,13 @@ schema fixed in its SQL, so a new schema must stay readable by every older reade
 Flink reprocesses the topic from the earliest offset, so every older record must stay
 readable by a newer reader. In practice, the only allowed change is adding or removing an
 optional field that has a default. The integration tests run against a real registry:
-adding the AIS rate of turn as an optional field is accepted; removing `lat` (it would
-break the Flink job), adding a required field (old records could not be reprocessed) and
-turning `mmsi` into a string are refused.
+adding the AIS rate of turn as an optional field is accepted; removing `lat` (readers
+have no default for it: Flink would read nulls, and port areas and the map would go wrong
+without any error), adding a required field (old records could not be reprocessed) and
+turning `mmsi` into a string are refused. So is a change compatible with the latest version
+but not with an older one (transitivity: a Flink job not yet redeployed still reads with
+the older schema). And when the `.avsc` in the repository is incompatible, `topics` stops
+the start with the registry's reason.
 
 To evolve a record: change the `.avsc` and the pydantic model together, run `make check`
 (the drift test), then `make integration`; on the next start, `topics` registers the new
