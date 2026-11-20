@@ -3,6 +3,7 @@
 
 from __future__ import annotations
 
+from collections.abc import Callable
 from datetime import UTC, datetime, timedelta
 
 import psycopg
@@ -219,3 +220,14 @@ def test_slow_queries_are_cancelled(client: TestClient, monkeypatch: pytest.Monk
     monkeypatch.setattr(api, "SHIPS_SQL", "select pg_sleep(3), %s")
     with pytest.raises(psycopg.errors.QueryCanceled):
         client.get("/v1/ships")
+
+
+def test_site_password_follows_the_environment(
+    postgres: str, site_dsn: str, rerun_init_sql: Callable[[str], None]
+) -> None:
+    rerun_init_sql("rotated")
+
+    with psycopg.connect(postgres.replace("ais:ais@", "site_reader:rotated@", 1)) as conn:
+        assert conn.execute("select current_user").fetchone() == ("site_reader",)
+    with pytest.raises(psycopg.OperationalError):
+        psycopg.connect(site_dsn).close()

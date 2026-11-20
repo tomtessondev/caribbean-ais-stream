@@ -155,7 +155,8 @@ make live    # the live producer and the site's endpoint on http://localhost:808
 The portfolio site draws the ships on its own map from a small read-only JSON service
 (`src/ais_stream/api.py`, FastAPI, `ais-stream api`, Compose service `api` in the `live`
 profile). It reads PostgreSQL as `site_reader`, a role that can only select the three
-relations it serves (password `SITE_DB_PASSWORD`, never committed), answers only `GET`,
+relations it serves (password `SITE_DB_PASSWORD`, never committed, set again on every
+start so changing it rotates it), answers only `GET`,
 lets only the site's origins call it from a browser (CORS), and marks its answers
 cacheable for 5 seconds, the map's refresh rate (with `Vary: Origin`, so a shared cache
 keeps the site's answers apart). It gives up on the database after 3 seconds to connect

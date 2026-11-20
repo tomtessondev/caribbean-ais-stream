@@ -3,7 +3,7 @@ from __future__ import annotations
 import socket
 import time
 import urllib.request
-from collections.abc import Iterator
+from collections.abc import Callable, Iterator
 from pathlib import Path
 
 import psycopg
@@ -85,11 +85,45 @@ def schema_registry(network: Network, kafka: str) -> Iterator[str]:
         yield url
 
 
+def apply_init_sql(container: DockerContainer, site_password: str = SITE_PASSWORD) -> None:
+    """Run postgres/init.sql through psql as the db-schema service does."""
+    code, output = container.exec(
+        [
+            "env",
+            f"SITE_DB_PASSWORD={site_password}",
+            "psql",
+            "-v",
+            "ON_ERROR_STOP=1",
+            "-U",
+            "ais",
+            "-d",
+            "ais",
+            "-f",
+            "/init.sql",
+        ]
+    )
+    assert code == 0, output.decode()
+
+
+@pytest.fixture
+def rerun_init_sql(postgres_container: DockerContainer) -> Iterator[Callable[[str], None]]:
+    """Applies postgres/init.sql again with another site password; the test's password is
+    back afterwards for the other tests."""
+    yield lambda site_password: apply_init_sql(postgres_container, site_password)
+    apply_init_sql(postgres_container)
+
+
 @pytest.fixture(scope="session")
-def postgres() -> Iterator[str]:
+def postgres(postgres_container: DockerContainer) -> str:
+    """The owner's connection string; the site's role is `site_reader`."""
+    port = postgres_container.get_exposed_port(5432)
+    return f"postgresql://ais:ais@localhost:{port}/ais?connect_timeout=2"
+
+
+@pytest.fixture(scope="session")
+def postgres_container() -> Iterator[DockerContainer]:
     """The same PostgreSQL as docker-compose.yml, its schema applied by postgres/init.sql
-    through psql exactly as the db-schema service does, twice (it must be idempotent).
-    Yields the owner's connection string; the site's role is `site_reader`."""
+    through psql exactly as the db-schema service does, twice (it must be idempotent)."""
     container = (
         DockerContainer(POSTGRES_IMAGE)
         .with_env("POSTGRES_USER", "ais")
@@ -117,11 +151,8 @@ def postgres() -> Iterator[str]:
                     raise
                 time.sleep(0.5)
         for _ in range(2):
-            code, output = container.exec(
-                ["psql", "-v", "ON_ERROR_STOP=1", "-U", "ais", "-d", "ais", "-f", "/init.sql"]
-            )
-            assert code == 0, output.decode()
-        yield dsn
+            apply_init_sql(container)
+        yield container
 
 
 @pytest.fixture
