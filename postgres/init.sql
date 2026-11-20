@@ -114,3 +114,12 @@ select format('create role grafana_reader login password %L', :'grafana_password
 where not exists (select from pg_roles where rolname = 'grafana_reader')
 \gexec
 grant select on all tables in schema public to grafana_reader;
+
+-- The site's live map reads through its own role (src/ais_stream/api.py), which can only
+-- select what the endpoint serves. Its password comes from the environment
+-- (SITE_DB_PASSWORD).
+\getenv site_password SITE_DB_PASSWORD
+select format('create role site_reader login password %L', :'site_password')
+where not exists (select from pg_roles where rolname = 'site_reader')
+\gexec
+grant select on ship_positions, dark_periods, position_jumps to site_reader;

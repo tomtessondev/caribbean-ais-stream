@@ -23,7 +23,8 @@ up:
 	@echo "Kafka UI on http://localhost:8088, Flink on http://localhost:8082"
 
 live:
-	docker compose --profile live up -d --build live
+	docker compose --profile live up -d --build live api
+	@echo "Site endpoint on http://localhost:8089/v1/ships"
 
 down:
 	docker compose --profile live down

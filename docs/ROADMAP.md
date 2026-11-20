@@ -20,3 +20,7 @@
    registered in Confluent Schema Registry with FULL_TRANSITIVE compatibility by the
    `topics` command; the producer writes Avro, Flink reads it with `avro-confluent`; tests
    against a real registry show which changes are accepted and which are refused.
+6. **Live demo** (in progress). A read-only JSON endpoint (FastAPI, `ais-stream api`) for
+   the portfolio site's live map: the latest position of each ship seen in the last
+   minutes and the recent anomalies, read with its own select-only role; then the `live`
+   stack on a server, behind a reverse proxy, with public dashboards.

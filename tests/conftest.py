@@ -1,9 +1,12 @@
 from __future__ import annotations
 
 import socket
+import time
 import urllib.request
 from collections.abc import Iterator
+from pathlib import Path
 
+import psycopg
 import pytest
 from testcontainers.core.container import DockerContainer
 from testcontainers.core.network import Network
@@ -11,6 +14,9 @@ from testcontainers.core.waiting_utils import wait_for_logs
 
 KAFKA_IMAGE = "apache/kafka:3.9.1"
 REGISTRY_IMAGE = "confluentinc/cp-schema-registry:7.9.0"
+POSTGRES_IMAGE = "postgres:17.6"
+INIT_SQL = Path(__file__).parent.parent / "postgres" / "init.sql"
+SITE_PASSWORD = "site-test"
 
 
 def _free_port() -> int:
@@ -77,3 +83,50 @@ def schema_registry(network: Network, kafka: str) -> Iterator[str]:
         with urllib.request.urlopen(f"{url}/subjects", timeout=10) as response:
             assert response.status == 200
         yield url
+
+
+@pytest.fixture(scope="session")
+def postgres() -> Iterator[str]:
+    """The same PostgreSQL as docker-compose.yml, its schema applied by postgres/init.sql
+    through psql exactly as the db-schema service does, twice (it must be idempotent).
+    Yields the owner's connection string; the site's role is `site_reader`."""
+    container = (
+        DockerContainer(POSTGRES_IMAGE)
+        .with_env("POSTGRES_USER", "ais")
+        .with_env("POSTGRES_PASSWORD", "ais")
+        .with_env("POSTGRES_DB", "ais")
+        .with_env("GRAFANA_DB_PASSWORD", "grafana-test")
+        .with_env("SITE_DB_PASSWORD", SITE_PASSWORD)
+        .with_volume_mapping(str(INIT_SQL), "/init.sql", "ro")
+        .with_exposed_ports(5432)
+    )
+    with container:
+        dsn = (
+            f"postgresql://ais:ais@localhost:{container.get_exposed_port(5432)}/ais"
+            "?connect_timeout=2"
+        )
+        # The image's first start runs a temporary server on the socket only: TCP answers
+        # once the real one is up.
+        deadline = time.monotonic() + 60
+        while True:
+            try:
+                psycopg.connect(dsn).close()
+                break
+            except psycopg.OperationalError:
+                if time.monotonic() > deadline:
+                    raise
+                time.sleep(0.5)
+        for _ in range(2):
+            code, output = container.exec(
+                ["psql", "-v", "ON_ERROR_STOP=1", "-U", "ais", "-d", "ais", "-f", "/init.sql"]
+            )
+            assert code == 0, output.decode()
+        yield dsn
+
+
+@pytest.fixture
+def site_dsn(postgres: str) -> Iterator[str]:
+    """The site's read-only connection, on tables emptied before each test."""
+    with psycopg.connect(postgres) as conn:
+        conn.execute("truncate ship_positions, ship_sessions, ais_gaps, position_jumps")
+    yield postgres.replace("ais:ais@", f"site_reader:{SITE_PASSWORD}@", 1)
