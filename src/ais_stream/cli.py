@@ -158,4 +158,5 @@ def api(
     port: int = typer.Option(8000, help="Port to listen on"),
 ) -> None:
     """Serve the site's read-only endpoint: /v1/ships, /v1/anomalies, /health."""
-    uvicorn.run(create_app(database_url), host=host, port=port)
+    # Every visitor polls every 5 seconds: an access line per request would drown the logs.
+    uvicorn.run(create_app(database_url), host=host, port=port, access_log=False)

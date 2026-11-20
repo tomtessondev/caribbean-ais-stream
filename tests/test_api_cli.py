@@ -9,10 +9,10 @@ from ais_stream import cli
 
 
 def test_api_command_serves_the_app(monkeypatch: pytest.MonkeyPatch) -> None:
-    served: list[tuple[FastAPI, str, int]] = []
+    served: list[tuple[FastAPI, str, int, bool]] = []
 
-    def fake_run(app: FastAPI, host: str, port: int) -> None:
-        served.append((app, host, port))
+    def fake_run(app: FastAPI, host: str, port: int, access_log: bool = True) -> None:
+        served.append((app, host, port, access_log))
 
     monkeypatch.setattr(cli.uvicorn, "run", fake_run)
     monkeypatch.setenv("SITE_DATABASE_URL", "postgresql://site_reader:x@db/ais")
@@ -20,8 +20,9 @@ def test_api_command_serves_the_app(monkeypatch: pytest.MonkeyPatch) -> None:
     result = CliRunner().invoke(cli.app, ["api", "--host", "0.0.0.0", "--port", "8000"])
 
     assert result.exit_code == 0, result.output
-    [(app, host, port)] = served
+    [(app, host, port, access_log)] = served
     assert (host, port) == ("0.0.0.0", 8000)
+    assert access_log is False  # one line per poll of every visitor would drown the logs
     paths = {route.path for route in app.routes if isinstance(route, APIRoute)}
     assert paths == {"/v1/ships", "/v1/anomalies", "/health"}
 
