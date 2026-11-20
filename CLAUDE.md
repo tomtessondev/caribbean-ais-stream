@@ -22,6 +22,11 @@ count. Every change should be something a recruiter can read.
     line with the pydantic models), registration with FULL_TRANSITIVE compatibility,
     serializers. Positions and ships are Avro; `ais.dlq` stays JSON. The producer never
     auto-registers: change a record by editing the `.avsc` and the model together.
+  - `api.py`: read-only FastAPI endpoint for the site's live map (`ais-stream api`,
+    Compose service `api` in the `live` profile, localhost:8089): `/v1/ships`,
+    `/v1/anomalies`, `/health`; role `site_reader` (select on `ship_positions`,
+    `dark_periods`, `position_jumps` only, password `SITE_DB_PASSWORD`), CORS limited to
+    the site's origins, `Cache-Control: public, max-age=5`. Windows count from the clock.
 - Kafka 3.9 KRaft (`apache/kafka`), Kafka UI, Confluent Schema Registry (localhost:8081;
   `topics` registers the schemas on every start), Docker Compose
 - Flink 1.20 SQL (`flink/sql/ais_jobs.sql`, image `flink/Dockerfile` with Kafka, JDBC,
@@ -33,7 +38,8 @@ count. Every change should be something a recruiter can read.
   (`make e2e-up`, which does not submit the job: the tests submit it after their traffic).
   The `db-schema` service applies `postgres/init.sql` (idempotent) on every start.
 - pytest (unit; `e2e` marked tests on the Compose stack; integration marked `integration` with a real `apache/kafka` broker started
-  by the `kafka` fixture), ruff, mypy --strict
+  by the `kafka` fixture and a real PostgreSQL built by `postgres/init.sql` from the
+  `postgres` fixture, random host ports), ruff, mypy --strict
 - Grafana 12.3 on localhost:3002 (`grafana/`: provisioning + dashboard JSON, the source of
   truth; reads PostgreSQL as `grafana_reader`, select only, password `GRAFANA_DB_PASSWORD`),
   Prometheus on localhost:9090 (`prometheus/prometheus.yml`) scraping `kafka-exporter` and
@@ -46,7 +52,7 @@ count. Every change should be something a recruiter can read.
 python -m venv .venv && source .venv/bin/activate
 make install / check / integration
 make up            # Kafka + synthetic demo + Kafka UI (localhost:8088)
-make live          # real feed, needs AISSTREAM_API_KEY in .env (never commit it)
+make live          # real feed + site endpoint (localhost:8089), needs AISSTREAM_API_KEY in .env (never commit it)
 make e2e-up e2e    # fresh stack, then the end-to-end tests
 make fast-replay   # fresh stack, six hours of traffic replayed sixty times faster
 ```

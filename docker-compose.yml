@@ -94,6 +94,21 @@ services:
         condition: service_completed_successfully
     restart: unless-stopped
 
+  # The read-only JSON endpoint the site's live map polls (src/ais_stream/api.py), on
+  # http://localhost:8089/v1/ships. It reads PostgreSQL as site_reader, select only.
+  api:
+    <<: *app
+    profiles: ["live"]
+    command: ["api", "--host", "0.0.0.0", "--port", "8000"]
+    environment:
+      SITE_DATABASE_URL: postgresql://site_reader:${SITE_DB_PASSWORD:-site-local}@postgres:5432/ais
+    ports:
+      - "8089:8000"
+    depends_on:
+      db-schema:
+        condition: service_completed_successfully
+    restart: unless-stopped
+
   kafka-ui:
     image: kafbat/kafka-ui:v1.3.0
     environment:
@@ -131,8 +146,9 @@ services:
     command: ["psql", "-v", "ON_ERROR_STOP=1", "-h", "postgres", "-U", "ais", "-d", "ais", "-f", "/init.sql"]
     environment:
       PGPASSWORD: ais
-      # Password of the read-only role Grafana uses.
+      # Passwords of the read-only roles Grafana and the site's endpoint use.
       GRAFANA_DB_PASSWORD: ${GRAFANA_DB_PASSWORD:-grafana-local}
+      SITE_DB_PASSWORD: ${SITE_DB_PASSWORD:-site-local}
     volumes:
       - ./postgres/init.sql:/init.sql:ro
     depends_on:

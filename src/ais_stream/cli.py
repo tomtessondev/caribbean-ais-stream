@@ -1,4 +1,4 @@
-"""Command-line entry point: `ais-stream topics | live | replay | synthesize`."""
+"""Command-line entry point: `ais-stream topics | live | replay | synthesize | demo | api`."""
 
 from __future__ import annotations
 
@@ -11,7 +11,9 @@ from datetime import UTC, datetime, timedelta
 from pathlib import Path
 
 import typer
+import uvicorn
 
+from ais_stream.api import create_app
 from ais_stream.avro import register_schemas
 from ais_stream.kafka import AisProducer, create_topics
 from ais_stream.messages import parse_aisstream_time
@@ -143,3 +145,18 @@ def demo(
     finally:
         producer.flush()
         typer.echo(f"Played {sent} records, delivered {producer.delivered}")
+
+
+@app.command()
+def api(
+    database_url: str = typer.Option(
+        ...,
+        envvar="SITE_DATABASE_URL",
+        help="PostgreSQL connection string of the read-only site_reader role",
+    ),
+    host: str = typer.Option("127.0.0.1", help="Interface to listen on"),
+    port: int = typer.Option(8000, help="Port to listen on"),
+) -> None:
+    """Serve the site's read-only endpoint: /v1/ships, /v1/anomalies, /health."""
+    # Every visitor polls every 5 seconds: an access line per request would drown the logs.
+    uvicorn.run(create_app(database_url), host=host, port=port, access_log=False)

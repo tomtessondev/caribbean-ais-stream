@@ -45,9 +45,10 @@ Third piece of a portfolio on the same islands, after
 | Synthetic traffic | Ferries, cargo, cruise, tanker at anchor, fishing boats, a ship going dark, a spoofed position | `src/ais_stream/synthetic.py` |
 | Stream processing | Flink 1.20 SQL: Kafka source, window TVFs (tumbling, session), `MATCH_RECOGNIZE`, JDBC/PostgreSQL upsert sinks | `flink/sql/ais_jobs.sql`, `flink/Dockerfile`, `postgres/init.sql` |
 | Dashboards | Grafana 12 provisioned as code: geomap of the ships, anomalies, port activity, stream health | `grafana/` |
+| Site endpoint | FastAPI, read-only role, CORS limited to the site: ships and anomalies as JSON | `src/ais_stream/api.py` |
 | Metrics | Prometheus scraping a Kafka exporter (broker view) and Flink's Prometheus reporter (job view) | `prometheus/prometheus.yml` |
 | Platform | Kafka 3.9 (KRaft, single node), Kafka UI, Flink, PostgreSQL, Docker Compose | `docker-compose.yml` |
-| Quality | pytest (unit, a fake WebSocket server, a real Kafka, end to end through Flink), ruff, mypy `--strict` | `tests/`, `.github/workflows/ci.yml` |
+| Quality | pytest (unit, a fake WebSocket server, a real Kafka and PostgreSQL, end to end through Flink), ruff, mypy `--strict` | `tests/`, `.github/workflows/ci.yml` |
 
 ## Quick start
 
@@ -146,8 +147,30 @@ With the real feed (free key from [aisstream.io](https://aisstream.io)):
 
 ```bash
 echo "AISSTREAM_API_KEY=..." > .env
-docker compose --profile live up -d --build live
+make live    # the live producer and the site's endpoint on http://localhost:8089
 ```
+
+## Site endpoint
+
+The portfolio site draws the ships on its own map from a small read-only JSON service
+(`src/ais_stream/api.py`, FastAPI, `ais-stream api`, Compose service `api` in the `live`
+profile). It reads PostgreSQL as `site_reader`, a role that can only select the three
+relations it serves (password `SITE_DB_PASSWORD`, never committed, set again on every
+start so changing it rotates it), answers only `GET`,
+lets only the site's origins call it from a browser (CORS), and marks its answers
+cacheable for 5 seconds, the map's refresh rate (with `Vary: Origin`, so a shared cache
+keeps the site's answers apart). It gives up on the database after 3 seconds to connect
+and 2 seconds per query, and publishes no OpenAPI schema or docs.
+
+| Route | Answer |
+| --- | --- |
+| `GET /v1/ships?since_minutes=30` (1 to 180) | `{"generated_at", "ships": [{mmsi, name, lat, lon, sog_kn, cog_deg, heading_deg, ts, port}]}`: the latest position of each ship seen in the window. A ship whose position is "not available" is left out, not drawn at (0, 0). |
+| `GET /v1/anomalies?hours=6` (1 to 48) | `{"generated_at", "dark_periods": [{mmsi, name, silent_from, silent_until, silent_minutes, lat, lon}], "position_jumps": [{mmsi, name, from_time, to_time, from_lat, from_lon, to_lat, to_lon, distance_nm, implied_speed_kn}]}`, latest first; `silent_until` is null while the ship is still dark. |
+| `GET /health` | `{"status": "ok"}`, or 503 when the database does not answer. |
+
+Unlike the Grafana panels, the windows count back from the clock, not from the latest
+position: a live map must empty when the feed stops. The integration tests run the
+service against a real PostgreSQL built by `postgres/init.sql`, as `site_reader`.
 
 Development:
 
@@ -155,7 +178,7 @@ Development:
 python -m venv .venv && source .venv/bin/activate
 make install        # pip install -e ".[dev]"
 make check          # ruff, mypy, unit tests
-make integration    # tests against a real Kafka broker (needs Docker)
+make integration    # tests against a real Kafka broker and PostgreSQL (needs Docker)
 make e2e-up e2e     # fresh Kafka + Flink + PostgreSQL, then the end-to-end tests
 ais-stream synthesize --hours 6 --out data/sample.jsonl
 ais-stream replay data/sample.jsonl --bootstrap localhost:9094
