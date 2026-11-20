@@ -3,9 +3,11 @@ a query runs. The queries themselves are tested on a real PostgreSQL (test_api_d
 
 from __future__ import annotations
 
+import psycopg
 import pytest
 from fastapi.testclient import TestClient
 
+from ais_stream import api
 from ais_stream.api import SITE_ORIGINS, create_app
 
 # Nothing listens on port 1: a request that reached the database would fail with a 500.
@@ -59,3 +61,28 @@ def test_health_reports_an_unreachable_database(client: TestClient) -> None:
     response = client.get("/health")
     assert response.status_code == 503
     assert response.json() == {"status": "unavailable"}
+
+
+def test_no_schema_or_docs_are_served(client: TestClient) -> None:
+    for path in ("/openapi.json", "/docs", "/redoc"):
+        assert client.get(path).status_code == 404
+
+
+@pytest.mark.parametrize("headers", [{}, {"Origin": "https://evil.example"}])
+def test_v1_responses_vary_on_origin(client: TestClient, headers: dict[str, str]) -> None:
+    # A shared cache must not hand an answer without CORS headers to the site, or the reverse.
+    response = client.get("/v1/ships", params={"since_minutes": 0}, headers=headers)
+    assert "Origin" in [v.strip() for v in response.headers.get("vary", "").split(",")]
+
+
+def test_connections_time_out(client: TestClient, monkeypatch: pytest.MonkeyPatch) -> None:
+    calls: list[dict[str, object]] = []
+
+    def refuse(dsn: str, **kwargs: object) -> None:
+        calls.append(kwargs)
+        raise psycopg.OperationalError("refused")
+
+    monkeypatch.setattr(api.psycopg, "connect", refuse)
+
+    assert client.get("/health").status_code == 503
+    assert calls == [{"connect_timeout": 3, "options": "-c statement_timeout=2000"}]

@@ -9,6 +9,7 @@ import psycopg
 import pytest
 from fastapi.testclient import TestClient
 
+from ais_stream import api
 from ais_stream.api import SITE_ORIGINS, create_app
 
 pytestmark = pytest.mark.integration
@@ -206,3 +207,15 @@ def test_site_role_can_only_read_what_it_serves(site_dsn: str) -> None:
             conn.execute("delete from ship_positions")
         with pytest.raises(psycopg.errors.InsufficientPrivilege):
             conn.execute("select * from port_events")
+
+
+def test_a_200_varies_on_origin(client: TestClient) -> None:
+    response = client.get("/v1/ships")
+    assert response.status_code == 200
+    assert "Origin" in [v.strip() for v in response.headers["vary"].split(",")]
+
+
+def test_slow_queries_are_cancelled(client: TestClient, monkeypatch: pytest.MonkeyPatch) -> None:
+    monkeypatch.setattr(api, "SHIPS_SQL", "select pg_sleep(3), %s")
+    with pytest.raises(psycopg.errors.QueryCanceled):
+        client.get("/v1/ships")

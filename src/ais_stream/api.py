@@ -16,6 +16,8 @@ from pydantic import BaseModel
 SITE_ORIGINS = ("https://antilles-data-pipeline.vercel.app", "http://localhost:3000")
 # The site polls every 5 seconds; a shared cache in front can answer in between.
 CACHE_CONTROL = "public, max-age=5"
+CONNECT_TIMEOUT_S = 3
+STATEMENT_TIMEOUT_MS = 2000
 
 
 class Ship(BaseModel):
@@ -94,13 +96,24 @@ order by to_time desc, mmsi
 
 
 def create_app(dsn: str) -> FastAPI:
-    app = FastAPI(title="Caribbean AIS stream", docs_url=None, redoc_url=None)
+    # A public endpoint publishes no schema or docs.
+    app = FastAPI(title="Caribbean AIS stream", docs_url=None, redoc_url=None, openapi_url=None)
+    # Starlette's CORS middleware adds `Vary: Origin` to every non-preflight response, so a
+    # shared cache keeps the answers for the site and for other callers apart.
     app.add_middleware(CORSMiddleware, allow_origins=SITE_ORIGINS, allow_methods=["GET"])
+
+    def connect() -> psycopg.Connection[tuple[object, ...]]:
+        # A stuck database must not hold the workers: fail fast instead.
+        return psycopg.connect(
+            dsn,
+            connect_timeout=CONNECT_TIMEOUT_S,
+            options=f"-c statement_timeout={STATEMENT_TIMEOUT_MS}",
+        )
 
     @app.get("/v1/ships")
     def ships(response: Response, since_minutes: int = Query(30, ge=1, le=180)) -> Ships:
         """Ships seen in the last `since_minutes`, at their latest position."""
-        with psycopg.connect(dsn) as conn, conn.cursor(row_factory=class_row(Ship)) as cur:
+        with connect() as conn, conn.cursor(row_factory=class_row(Ship)) as cur:
             rows = cur.execute(SHIPS_SQL, (since_minutes,)).fetchall()
         response.headers["Cache-Control"] = CACHE_CONTROL
         return Ships(generated_at=datetime.now(UTC), ships=rows)
@@ -108,7 +121,7 @@ def create_app(dsn: str) -> FastAPI:
     @app.get("/v1/anomalies")
     def anomalies(response: Response, hours: int = Query(6, ge=1, le=48)) -> Anomalies:
         """Dark periods and impossible position jumps of the last `hours`."""
-        with psycopg.connect(dsn) as conn:
+        with connect() as conn:
             with conn.cursor(row_factory=class_row(DarkPeriod)) as cur:
                 dark = cur.execute(DARK_SQL, (hours,)).fetchall()
             with conn.cursor(row_factory=class_row(PositionJump)) as cur:
@@ -119,7 +132,7 @@ def create_app(dsn: str) -> FastAPI:
     @app.get("/health")
     def health() -> JSONResponse:
         try:
-            with psycopg.connect(dsn) as conn:
+            with connect() as conn:
                 conn.execute("select 1")
         except psycopg.OperationalError:
             return JSONResponse({"status": "unavailable"}, status_code=503)

@@ -157,7 +157,9 @@ The portfolio site draws the ships on its own map from a small read-only JSON se
 profile). It reads PostgreSQL as `site_reader`, a role that can only select the three
 relations it serves (password `SITE_DB_PASSWORD`, never committed), answers only `GET`,
 lets only the site's origins call it from a browser (CORS), and marks its answers
-cacheable for 5 seconds, the map's refresh rate.
+cacheable for 5 seconds, the map's refresh rate (with `Vary: Origin`, so a shared cache
+keeps the site's answers apart). It gives up on the database after 3 seconds to connect
+and 2 seconds per query, and publishes no OpenAPI schema or docs.
 
 | Route | Answer |
 | --- | --- |
