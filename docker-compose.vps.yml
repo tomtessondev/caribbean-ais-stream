@@ -1,0 +1,365 @@
+# The live pipeline on a VPS, deployed by Coolify (build pack "Docker Compose"); see
+# docs/deploy-vps.md. Unlike docker-compose.yml: no demo producer, no Kafka UI, no port
+# published on the host (Coolify's Traefik reaches grafana and api over its own network),
+# a memory limit on every container (4.1 GB for the long-running services, about 2 GB
+# used in practice), bounded retention, and secrets from Coolify:
+#   SERVICE_PASSWORD_*   generated once by Coolify (magic variables), never in Git
+#   AISSTREAM_API_KEY    entered by hand in Coolify's UI
+# Configuration files are baked into small images rather than bind-mounted, so the stack
+# does not depend on where Coolify checks the repository out.
+
+x-app: &app
+  build: .
+  environment:
+    KAFKA_BOOTSTRAP: kafka:9092
+    SCHEMA_REGISTRY_URL: http://schema-registry:8081
+
+x-flink: &flink
+  build: ./flink
+
+services:
+  kafka:
+    image: apache/kafka:3.9.1
+    environment:
+      KAFKA_NODE_ID: "1"
+      KAFKA_PROCESS_ROLES: broker,controller
+      KAFKA_LISTENERS: INTERNAL://:9092,CONTROLLER://:9093
+      KAFKA_ADVERTISED_LISTENERS: INTERNAL://kafka:9092
+      KAFKA_LISTENER_SECURITY_PROTOCOL_MAP: INTERNAL:PLAINTEXT,CONTROLLER:PLAINTEXT
+      KAFKA_INTER_BROKER_LISTENER_NAME: INTERNAL
+      KAFKA_CONTROLLER_LISTENER_NAMES: CONTROLLER
+      KAFKA_CONTROLLER_QUORUM_VOTERS: 1@localhost:9093
+      KAFKA_OFFSETS_TOPIC_REPLICATION_FACTOR: "1"
+      KAFKA_TRANSACTION_STATE_LOG_REPLICATION_FACTOR: "1"
+      KAFKA_TRANSACTION_STATE_LOG_MIN_ISR: "1"
+      KAFKA_GROUP_INITIAL_REBALANCE_DELAY_MS: "0"
+      KAFKA_AUTO_CREATE_TOPICS_ENABLE: "false"
+      KAFKA_LOG_DIRS: /var/lib/kafka/data
+      # A size cap per partition on top of the time retention (topic-retention below):
+      # whatever the feed does, the deleting topics stay under 1.5 GB on disk.
+      KAFKA_LOG_RETENTION_BYTES: "268435456"
+      KAFKA_HEAP_OPTS: -Xms448m -Xmx448m
+    volumes:
+      - kafka-data:/var/lib/kafka/data
+    healthcheck:
+      test: ["CMD-SHELL", "/opt/kafka/bin/kafka-topics.sh --bootstrap-server localhost:9092 --list"]
+      interval: 10s
+      timeout: 20s
+      retries: 30
+      start_period: 30s
+    deploy:
+      resources:
+        limits:
+          memory: 768M
+    restart: unless-stopped
+
+  schema-registry:
+    image: confluentinc/cp-schema-registry:7.9.0
+    environment:
+      SCHEMA_REGISTRY_HOST_NAME: schema-registry
+      SCHEMA_REGISTRY_LISTENERS: http://0.0.0.0:8081
+      SCHEMA_REGISTRY_KAFKASTORE_BOOTSTRAP_SERVERS: PLAINTEXT://kafka:9092
+      SCHEMA_REGISTRY_HEAP_OPTS: -Xms128m -Xmx256m
+    depends_on:
+      kafka:
+        condition: service_healthy
+    healthcheck:
+      test: ["CMD-SHELL", "curl -sf http://localhost:8081/subjects"]
+      interval: 10s
+      retries: 30
+      start_period: 20s
+    deploy:
+      resources:
+        limits:
+          memory: 384M
+    restart: unless-stopped
+
+  # Registers the schemas and creates the topics on every deployment, then exits.
+  topics:
+    <<: *app
+    command: ["topics"]
+    depends_on:
+      kafka:
+        condition: service_healthy
+      schema-registry:
+        condition: service_healthy
+    deploy:
+      resources:
+        limits:
+          memory: 128M
+
+  # The code keeps positions a week and dead letters two weeks; on the VPS three days of
+  # each is enough, and it bounds what Flink re-reads when it resubmits the job.
+  topic-retention:
+    image: apache/kafka:3.9.1
+    command:
+      - bash
+      - -c
+      - |
+        for topic in ais.positions ais.dlq; do
+          /opt/kafka/bin/kafka-configs.sh --bootstrap-server kafka:9092 --alter \
+            --entity-type topics --entity-name "$$topic" --add-config retention.ms=259200000
+        done
+    environment:
+      KAFKA_HEAP_OPTS: -Xmx128m
+    depends_on:
+      topics:
+        condition: service_completed_successfully
+    deploy:
+      resources:
+        limits:
+          memory: 256M
+
+  live:
+    <<: *app
+    command: ["live"]
+    environment:
+      KAFKA_BOOTSTRAP: kafka:9092
+      SCHEMA_REGISTRY_URL: http://schema-registry:8081
+      # No default: Coolify lists it as a variable to fill in.
+      AISSTREAM_API_KEY: ${AISSTREAM_API_KEY}
+    depends_on:
+      topics:
+        condition: service_completed_successfully
+    deploy:
+      resources:
+        limits:
+          memory: 128M
+    restart: unless-stopped
+
+  postgres:
+    image: postgres:17.6
+    environment:
+      POSTGRES_USER: ais
+      POSTGRES_PASSWORD: ${SERVICE_PASSWORD_POSTGRES}
+      POSTGRES_DB: ais
+    volumes:
+      - postgres-data:/var/lib/postgresql/data
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U ais -d ais"]
+      interval: 5s
+      retries: 30
+    deploy:
+      resources:
+        limits:
+          memory: 256M
+    restart: unless-stopped
+
+  # Applies postgres/init.sql (idempotent) on every deployment, then exits.
+  db-schema:
+    build:
+      context: ./postgres
+      dockerfile_inline: |
+        FROM postgres:17.6
+        COPY init.sql /init.sql
+    command: ["psql", "-v", "ON_ERROR_STOP=1", "-h", "postgres", "-U", "ais", "-d", "ais", "-f", "/init.sql"]
+    environment:
+      PGPASSWORD: ${SERVICE_PASSWORD_POSTGRES}
+      GRAFANA_DB_PASSWORD: ${SERVICE_PASSWORD_GRAFANADB}
+      SITE_DB_PASSWORD: ${SERVICE_PASSWORD_SITEREADER}
+    depends_on:
+      postgres:
+        condition: service_healthy
+    deploy:
+      resources:
+        limits:
+          memory: 64M
+
+  # The site's read-only endpoint; Coolify routes https://<domain>/v1 here, prefix kept.
+  api:
+    <<: *app
+    command: ["api", "--host", "0.0.0.0", "--port", "8000"]
+    environment:
+      SITE_DATABASE_URL: postgresql://site_reader:${SERVICE_PASSWORD_SITEREADER}@postgres:5432/ais
+    expose:
+      - "8000"
+    depends_on:
+      db-schema:
+        condition: service_completed_successfully
+    healthcheck:
+      test: ["CMD", "python", "-c", "import urllib.request; urllib.request.urlopen('http://localhost:8000/health', timeout=3)"]
+      interval: 15s
+      timeout: 5s
+      retries: 5
+      start_period: 10s
+    deploy:
+      resources:
+        limits:
+          memory: 128M
+    restart: unless-stopped
+
+  flink-jobmanager:
+    <<: *flink
+    command: ["jobmanager"]
+    environment:
+      FLINK_PROPERTIES: |
+        jobmanager.rpc.address: flink-jobmanager
+        state.checkpoints.dir: file:///tmp/flink-checkpoints
+        metrics.reporter.prom.factory.class: org.apache.flink.metrics.prometheus.PrometheusReporterFactory
+        metrics.reporter.prom.port: 9249
+        jobmanager.memory.process.size: 576m
+        jobmanager.memory.jvm-metaspace.size: 160m
+        jobmanager.memory.jvm-overhead.min: 96m
+        jobmanager.memory.off-heap.size: 64m
+    healthcheck:
+      test: ["CMD-SHELL", "wget -qO /dev/null http://localhost:8081/overview"]
+      interval: 10s
+      retries: 30
+      start_period: 20s
+    deploy:
+      resources:
+        limits:
+          memory: 640M
+    restart: unless-stopped
+
+  flink-taskmanager:
+    <<: *flink
+    command: ["taskmanager"]
+    environment:
+      FLINK_PROPERTIES: |
+        jobmanager.rpc.address: flink-jobmanager
+        taskmanager.numberOfTaskSlots: 2
+        metrics.reporter.prom.factory.class: org.apache.flink.metrics.prometheus.PrometheusReporterFactory
+        metrics.reporter.prom.port: 9249
+        taskmanager.memory.process.size: 960m
+        taskmanager.memory.jvm-metaspace.size: 192m
+        taskmanager.memory.jvm-overhead.min: 128m
+        taskmanager.memory.managed.size: 64m
+    depends_on:
+      flink-jobmanager:
+        condition: service_healthy
+    deploy:
+      resources:
+        limits:
+          memory: 1G
+    restart: unless-stopped
+
+  # Keeps the SQL job submitted. The job manager keeps no job across its own restart (no
+  # HA store), so a one-shot submission would leave the pipeline idle after a reboot:
+  # every minute, if the cluster has a task manager and no job alive, this submits
+  # flink/sql/ais_jobs.sql again. The sinks upsert, so re-reading the topic is harmless.
+  # The SQL file carries the local password of the JDBC sinks; the copy submitted here
+  # gets the real one.
+  flink-jobs:
+    <<: *flink
+    command:
+      - bash
+      - -c
+      - |
+        sed "s|'password' = 'ais'|'password' = '$${SINK_DB_PASSWORD}'|" \
+          /opt/flink/sql/ais_jobs.sql > /tmp/ais_jobs.sql
+        while true; do
+          overview=$$(wget -qO- http://flink-jobmanager:8081/overview || true)
+          jobs=$$(wget -qO- http://flink-jobmanager:8081/jobs/overview || true)
+          if echo "$$overview" | grep -q '"taskmanagers":[1-9]' \
+            && ! echo "$$jobs" | grep -Eq '"state":"(CREATED|INITIALIZING|RUNNING|RESTARTING|FAILING|CANCELLING|RECONCILING)"'; then
+            echo "No job alive: submitting ais_jobs.sql"
+            bin/sql-client.sh -f /tmp/ais_jobs.sql > /tmp/submit.log 2>&1 \
+              && grep 'Job ID' /tmp/submit.log \
+              || { grep '\[ERROR\]' /tmp/submit.log; echo "Submission failed, retrying in a minute"; }
+          fi
+          sleep 60
+        done
+    environment:
+      FLINK_PROPERTIES: |
+        jobmanager.rpc.address: flink-jobmanager
+        rest.address: flink-jobmanager
+      JVM_ARGS: -Xmx192m
+      SINK_DB_PASSWORD: ${SERVICE_PASSWORD_POSTGRES}
+    depends_on:
+      flink-jobmanager:
+        condition: service_healthy
+      flink-taskmanager:
+        condition: service_started
+      db-schema:
+        condition: service_completed_successfully
+      topics:
+        condition: service_completed_successfully
+    deploy:
+      resources:
+        limits:
+          memory: 320M
+    restart: unless-stopped
+
+  # Offsets and consumer lag for the stream health dashboard.
+  kafka-exporter:
+    image: danielqsj/kafka-exporter:v1.9.0
+    command: ["--kafka.server=kafka:9092"]
+    depends_on:
+      kafka:
+        condition: service_healthy
+    deploy:
+      resources:
+        limits:
+          memory: 64M
+    restart: unless-stopped
+
+  # Internal only: Grafana is its sole reader.
+  prometheus:
+    build:
+      context: ./prometheus
+      dockerfile_inline: |
+        FROM prom/prometheus:v3.5.0
+        COPY prometheus.yml /etc/prometheus/prometheus.yml
+    command:
+      - --config.file=/etc/prometheus/prometheus.yml
+      - --storage.tsdb.path=/prometheus
+      - --storage.tsdb.retention.time=7d
+      - --storage.tsdb.retention.size=1GB
+    volumes:
+      - prometheus-data:/prometheus
+    depends_on:
+      - kafka-exporter
+    healthcheck:
+      test: ["CMD-SHELL", "wget -qO /dev/null http://localhost:9090/-/healthy"]
+      interval: 15s
+      retries: 10
+    deploy:
+      resources:
+        limits:
+          memory: 192M
+    restart: unless-stopped
+
+  # Public, read-only for visitors (anonymous viewer); Coolify routes https://<domain> here.
+  grafana:
+    build:
+      context: ./grafana
+      dockerfile_inline: |
+        FROM grafana/grafana:12.3.0
+        COPY provisioning /etc/grafana/provisioning
+        COPY dashboards /var/lib/grafana/dashboards
+    environment:
+      GRAFANA_DB_PASSWORD: ${SERVICE_PASSWORD_GRAFANADB}
+      GF_SECURITY_ADMIN_PASSWORD: ${SERVICE_PASSWORD_GRAFANAADMIN}
+      GF_SERVER_ROOT_URL: https://ais.horizon-studio.dev
+      GF_USERS_ALLOW_SIGN_UP: "false"
+      GF_ANALYTICS_REPORTING_ENABLED: "false"
+      GF_ANALYTICS_CHECK_FOR_UPDATES: "false"
+      GF_AUTH_ANONYMOUS_ENABLED: "true"
+      GF_AUTH_ANONYMOUS_ORG_ROLE: Viewer
+      GF_DASHBOARDS_DEFAULT_HOME_DASHBOARD_PATH: /var/lib/grafana/dashboards/ais-traffic.json
+    expose:
+      - "3000"
+    volumes:
+      - grafana-data:/var/lib/grafana
+    depends_on:
+      db-schema:
+        condition: service_completed_successfully
+      prometheus:
+        condition: service_healthy
+    healthcheck:
+      test: ["CMD-SHELL", "wget -qO /dev/null http://localhost:3000/api/health"]
+      interval: 15s
+      retries: 10
+      start_period: 20s
+    deploy:
+      resources:
+        limits:
+          memory: 256M
+    restart: unless-stopped
+
+volumes:
+  kafka-data:
+  postgres-data:
+  prometheus-data:
+  grafana-data:
