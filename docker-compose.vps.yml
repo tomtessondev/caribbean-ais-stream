@@ -195,6 +195,9 @@ services:
     <<: *flink
     command: ["jobmanager"]
     environment:
+      # Coolify sets HOST=0.0.0.0 in every container and jobmanager.sh advertises $HOST:
+      # without this the task manager cannot register.
+      HOST: flink-jobmanager
       FLINK_PROPERTIES: |
         jobmanager.rpc.address: flink-jobmanager
         state.checkpoints.dir: file:///tmp/flink-checkpoints
