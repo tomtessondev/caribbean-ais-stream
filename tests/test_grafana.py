@@ -30,7 +30,9 @@ def test_provisioning_points_at_the_dashboards() -> None:
     )
     assert {s["uid"] for s in sources["datasources"]} == DATASOURCES
     providers = yaml.safe_load((GRAFANA / "provisioning" / "dashboards" / "ais.yaml").read_text())
-    assert providers["providers"][0]["options"]["path"] == "/var/lib/grafana/dashboards"
+    # Outside /var/lib/grafana: that directory is the data volume, which would keep the
+    # dashboards of the first deployment and hide newer ones.
+    assert providers["providers"][0]["options"]["path"] == "/etc/grafana/dashboards"
 
 
 def test_every_query_renders() -> None:
