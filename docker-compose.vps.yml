@@ -76,6 +76,7 @@ services:
 
   # Registers the schemas and creates the topics on every deployment, then exits.
   topics:
+    restart: "no"
     <<: *app
     command: ["topics"]
     depends_on:
@@ -91,6 +92,7 @@ services:
   # The code keeps positions a week and dead letters two weeks; on the VPS three days of
   # each is enough, and it bounds what Flink re-reads when it resubmits the job.
   topic-retention:
+    restart: "no"
     image: apache/kafka:3.9.1
     command:
       - bash
@@ -147,6 +149,7 @@ services:
 
   # Applies postgres/init.sql (idempotent) on every deployment, then exits.
   db-schema:
+    restart: "no"
     build:
       context: ./postgres
       dockerfile_inline: |
