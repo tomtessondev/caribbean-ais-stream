@@ -35,3 +35,9 @@ def test_every_service_states_its_restart_policy() -> None:
 
 def test_no_service_publishes_a_host_port() -> None:
     assert [name for name, svc in services().items() if "ports" in svc] == []
+
+
+def test_jobmanager_advertises_its_service_name() -> None:
+    # Coolify sets HOST=0.0.0.0 in every container, and Flink's jobmanager.sh advertises
+    # $HOST: the task manager's messages to flink-jobmanager would then be dropped.
+    assert services()["flink-jobmanager"]["environment"]["HOST"] == "flink-jobmanager"
